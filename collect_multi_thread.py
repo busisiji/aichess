@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 import multiprocessing
 import time
 import logging
@@ -12,16 +13,15 @@ import torch
 from mpmath import mp
 
 from pytorch_net import PolicyValueNet
-from zip_array import zip_array_fast, recovery_array_fast,compress_game_data,decompress_game_data
+from zip_array import compress_game_data, decompress_game_data
 
 # 从已有模块导入
 from game import Board, Game, move_id2move_action, move_action2move_id, flip_map
 from mcts import MCTSPlayer
 from config import CONFIG
 
-# Redis 支持
-if CONFIG['use_redis']:
-    import redis
+# 使用统一数据服务
+from data_service import DataManagementService
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -52,19 +52,11 @@ class ProcessSafeCollectPipeline:
         self.buffer_size = CONFIG.get('buffer_size', 100000)
         self.iters = 0
         self.temp_play_data = []  # 临时缓存未完成的对局数据
-        self.nums = [] #  记录每局步数 * 2（包括镜像）
-        self.use_compression = CONFIG.get('use_data_compression', False)  # 默认不启用
+        self.nums = []  # 记录每局步数 * 2（包括镜像）
 
-
-        if CONFIG['use_redis']:
-            self.redis_client = redis.Redis(
-                host=CONFIG['redis_host'],
-                port=CONFIG['redis_port'],
-                db=CONFIG['redis_db']
-            )
-        else:
-            self.data_buffer = deque(maxlen=self.buffer_size)
-            self.temp_play_data = []
+        # 初始化统一数据服务
+        self.data_service = DataManagementService(CONFIG)
+        self.use_compression = self.data_service.use_compression
 
         # 加载传入的共享模型
         self.policy_value_net = model
@@ -78,55 +70,18 @@ class ProcessSafeCollectPipeline:
             is_selfplay=1
         )
 
-        # 尝试从磁盘/Redis 恢复数据
-        self.load_data_buffer()
-
-    def load_data_buffer(self):
-        data_key = f"data/data_buffer_process_{self.process_id}"
-        if CONFIG['use_redis']:
-            meta = self.redis_client.get(data_key)
-            if meta:
-                try:
-                    meta_dict = pickle.loads(meta)
-                    self.data_buffer = deque(meta_dict['data_buffer'], maxlen=self.buffer_size)
-                    self.iters = meta_dict.get('iters', 0)
-                    self.nums = meta_dict.get('nums', [])
-                    logger.info(f"[进程 {self.process_id}] 从 Redis 恢复数据，迭代次数: {self.iters}")
-                except Exception as e:
-                    logger.error(f"[进程 {self.process_id}] Redis 数据加载失败: {e}")
-        else:
-            filename = f"{data_key}.pkl"
-            if os.path.exists(filename):
-                try:
-                    with open(filename, 'rb') as f:
-                        data_dict = pickle.load(f)
-
-                    # 如果启用了压缩，则对数据进行解压
-                    loaded_data = data_dict.get('data_buffer', [])
-                    if self.use_compression and loaded_data and isinstance(loaded_data[0], bytes):
-                        decompressed_data = []
-                        for item in loaded_data:
-                            decompressed = decompress_game_data(item)
-                            decompressed_data.extend(decompressed)
-                        loaded_data = decompressed_data
-
-                    self.data_buffer = deque(loaded_data, maxlen=self.buffer_size)
-                    self.iters = data_dict.get('iters', 0)
-                    self.nums = data_dict.get('nums', [])
-                    logger.info(f"[进程 {self.process_id}] 从本地文件 {filename} 恢复数据，迭代次数: {self.iters}")
-                except Exception as e:
-                    logger.error(f"[进程 {self.process_id}] 文件 {filename} 加载失败: {e}")
-
+        # 尝试恢复本地数据
+        self.data_buffer = self.data_service.load_initial_data() or []
 
     def get_equi_data(self, play_data):
+        """数据增强：水平翻转"""
         extend_data = []
         for state, mcts_prob, winner in play_data:
-            # 原始数据
             extend_data.append((state, mcts_prob, winner))
 
-            # 水平翻转后的数据
-            state = state.transpose([1, 2, 0])  # CHW -> HWC
+            # 翻转数据
             state_flip = np.zeros_like(state)
+            state = state.transpose([1, 2, 0])  # CHW -> HWC
             for i in range(10):
                 for j in range(9):
                     state_flip[i][j] = state[i][8 - j]
@@ -160,222 +115,29 @@ class ProcessSafeCollectPipeline:
             # 数据增强
             extended_data = self.get_equi_data(play_data)
 
-            # 先暂存在临时变量中
-            self.temp_play_data = extended_data
+            # 使用服务接口写入数据
+            self.data_service.write_play_data(self.process_id, extended_data, self.iters + 1, [episode_len*2])
 
-
-            if CONFIG['use_redis']:
-                data_key = f'train_data:{self.process_id}'
-                data_dict = {
-                    'data_buffer': self.temp_play_data,
-                    'iters': self.iters + 1,
-                    'nums': self.nums
-                }
-                try:
-                    self.redis_client.setex(data_key, 3600, pickle.dumps(data_dict))
-                    logger.info(f"[进程 {self.process_id}] 已写入 Redis: {data_key}")
-                except Exception as e:
-                    logger.error(f"[进程 {self.process_id}] Redis 写入失败: {e}")
-            else:
-                # 仅在完整局结束后才写入主 buffer
-                self.data_buffer.extend(self.temp_play_data)
-                self.iters += 1
-                self.nums.append(episode_len*2)
-
-            self.save_to_disk()
-
+            self.iters += 1
             logger.info(f"[进程 {self.process_id}] 第 {self.iters} 局结束，总步数: {episode_len}, 胜者: {winner}")
 
         except Exception as e:
             logger.error(f"[进程 {self.process_id}] 对局中断或出错: {e}")
             print(f"[进程 {self.process_id}] ⚠️ 对局中断，放弃当前未完成的数据")
-            self.temp_play_data.clear()  # 清除临时数据
-
 
     def save_to_disk(self):
-        if not CONFIG['use_redis']:
-            data_key = f"data/data_buffer_process_{self.process_id}"
-            filename = f"{data_key}.pkl"
-            temp_filename = f"{filename}.tmp"
-
-            # 如果启用了压缩，则对数据进行压缩
-            if self.use_compression:
-                compressed_data_list = []
-                for item in self.data_buffer:
-                    compressed_data = compress_game_data([item])  # 单条数据包装成列表
-                    compressed_data_list.extend(compressed_data)
-                data_to_save = {
-                    'data_buffer': compressed_data_list,
-                    'iters': self.iters,
-                    'nums': self.nums,
-                }
-            else:
-                data_to_save = {
-                    'data_buffer': list(self.data_buffer),
-                    'iters': self.iters,
-                    'nums': self.nums,
-                }
-
-            try:
-                with open(temp_filename, 'wb') as f:
-                    pickle.dump(data_to_save, f)
-                os.replace(temp_filename, filename)
-            except Exception as e:
-                logger.error(f"[进程 {self.process_id}] 保存文件失败: {e}")
-                if os.path.exists(temp_filename):
-                    os.remove(temp_filename)
-
+        """保留此方法作为备用，实际由 data_service 处理"""
+        pass
 
 
 # 主进程合并
 def merge_and_cleanup_data_buffers(output_path, num_processes, buffer_size=100000):
-    merged_buffer = deque(maxlen=buffer_size)
-    total_iters = 0
-    skipped_episodes = 0
-    step_nums_unique = []
-
-    # Step 1: 加载已有主数据，并提取其 episode 哈希值用于后续对比
-    existing_episodes = set()
-    if os.path.exists(output_path):
-        try:
-            with open(output_path, 'rb') as f:
-                existing_data = pickle.load(f)
-            for item in existing_data.get('data_buffer', []):
-                merged_buffer.append(item)
-
-            # 提取历史数据中的 episodes 并哈希存储
-            play_index = 0
-            play_data = existing_data.get('data_buffer', [])
-            step_nums = existing_data.get('nums', [])
-
-            for step_num in step_nums:
-                episode_data = list(play_data)[play_index: play_index + step_num]
-                if episode_data:
-                    hashable = tuple((tuple(s.flatten()), tuple(mp), w) for s, mp, w in episode_data)
-                    existing_episodes.add(hashable)
-                play_index += step_num
-
-            logger.info(f"✅ 已加载历史数据 {len(existing_data.get('data_buffer', []))} 条")
-        except Exception as e:
-            logger.error(f"❌ 加载历史数据失败: {e}")
-
-    # Step 2: 收集所有子进程数据到一个全局缓冲区
-    global_play_data = []
-    global_step_nums = []
-    total_iters = 0
-
-    if CONFIG['use_redis']:
-        redis_client = redis.Redis(
-            host=CONFIG['redis_host'],
-            port=CONFIG['redis_port'],
-            db=CONFIG['redis_db']
-        )
-
-        for pid in range(num_processes):
-            data_key = f'train_data:{pid}'
-            item = redis_client.get(data_key)
-            if item:
-                try:
-                    data_dict = pickle.loads(item)
-                    play_data = data_dict.get('data_buffer', [])
-                    step_nums = data_dict.get('nums', [])
-                    pid_iters = data_dict.get('iters', 0)
-
-                    global_play_data.extend(play_data)
-                    global_step_nums.extend(step_nums)
-                    total_iters += pid_iters
-
-                    redis_client.delete(data_key)
-                    logger.info(f"[进程 {pid}] 数据已从 Redis 取出")
-                except Exception as e:
-                    logger.error(f"❌ Redis 数据反序列化失败: {e}")
-    else:
-        for pid in range(num_processes):
-            filename = f"data/data_buffer_process_{pid}.pkl"
-            if not os.path.exists(filename):
-                continue
-            try:
-                with open(filename, 'rb') as f:
-                    data_dict = pickle.load(f)
-
-                play_data = data_dict.get('data_buffer', [])
-                step_nums = data_dict.get('nums', [])
-                pid_iters = data_dict.get('iters', 0)
-
-                # 如果是压缩数据，则解压
-                if CONFIG.get('use_data_compression', False) :
-                    decompressed = decompress_game_data(play_data)
-
-                global_play_data.extend(decompressed)
-                global_step_nums.extend(step_nums)
-                total_iters += pid_iters
-
-                logger.info(f"[进程 {pid}] 数据已从本地取出")
-            except Exception as e:
-                logger.error(f"❌ 合并 {filename} 时出错: {str(e)}")
-
-
-    # Step 3: 根据 step_nums 划分 episode
-    episodes = []
-    play_index = 0
-    for step_num in global_step_nums:
-        episode_data = list(global_play_data)[play_index: play_index + step_num]
-        if episode_data:
-            episodes.append(episode_data)
-        play_index += step_num
-
-    # Step 4: 子数据集内部去重
-    seen_episodes = set()
-    unique_episodes_from_processes = []
-
-    for ep_idx, episode in enumerate(episodes):
-        hashable_episode = tuple(
-            (tuple(state.flatten()), tuple(mcts_prob), winner)
-            for state, mcts_prob, winner in episode
-        )
-        if hashable_episode not in seen_episodes:
-            seen_episodes.add(hashable_episode)
-            unique_episodes_from_processes.append(episode)
-            step_nums_unique.append(global_step_nums[ep_idx])
-        else:
-            skipped_episodes += 1
-
-    logger.info(f"📌 子数据集内部去重完成，共保留 {len(unique_episodes_from_processes)} 局")
-
-    # Step 5: 与已有主数据进行比较，排除重复的局
-    final_unique_episodes = []
-
-    for episode in unique_episodes_from_processes:
-        hashable = tuple(
-            (tuple(state.flatten()), tuple(mcts_prob), winner)
-            for state, mcts_prob, winner in episode
-        )
-        if hashable not in existing_episodes:
-            final_unique_episodes.append(episode)
-        else:
-            skipped_episodes += 1
-
-    logger.info(f"📌 与主数据对比后，共保留 {len(final_unique_episodes)} 局新数据")
-
-    # Step 6: 写入最终数据
-    for episode in final_unique_episodes:
-        # 压缩数据
-        compressed_data = compress_game_data(episode)
-        merged_buffer.extend(compressed_data)
-
-    # 构造输出结构
-    merged_data = {
-        'data_buffer': list(merged_buffer),
-        'iters': total_iters,
-        # 'nums': step_nums_unique,
-    }
-
-    with open(output_path, 'wb') as f:
-        pickle.dump(merged_data, f)
-
-    logger.info(f"✅ 所有进程数据已追加合并至 {output_path}")
-    logger.info(f"🚫 共跳过 {skipped_episodes} 局重复数据")
-
+    """
+    使用统一数据服务进行数据合并与去重
+    """
+    data_service = DataManagementService(CONFIG)
+    merged_data = data_service.merge_all_data(output_path, num_processes)
+    return merged_data
 
 
 # 配置日志系统
@@ -440,7 +202,7 @@ if __name__ == "__main__":
     print("🔄 加载模型中...")
     try:
         policy_value_net = PolicyValueNet(model_file=MODEL_PATH)
-        print("✅ 模型加载成功：",  MODEL_PATH)
+        print("✅ 模型加载成功：", MODEL_PATH)
     except Exception as e:
         print("❌ 模型加载失败，尝试初始化新模型")
         policy_value_net = PolicyValueNet()
@@ -450,23 +212,5 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() and CONFIG['use_frame'] == 'pytorch' else 'cpu'
     print(f"🎮 使用设备: {device.upper()}")
 
-    # 先合并历史数据
-    OUTPUT_PATH = CONFIG['train_data_buffer_path']
-
-    # 使用 spawn 方式启动多进程（适用于 GPU）
-    ctx = multiprocessing.get_context('spawn')
-    Process = ctx.Process
-
-    processes = []
-    try:
-        for pid in range(NUM_PROCESSES):
-            p = Process(target=run_pipeline, args=(pid, policy_value_net))  # 只传两个参数
-            processes.append(p)
-            p.start()
-
-        for p in processes:
-            p.join()
-    except KeyboardInterrupt:
-        print("🛑 主进程收到中断信号，开始合并数据...")
-        merge_and_cleanup_data_buffers(OUTPUT_PATH, NUM_PROCESSES)
-        print("✅ 数据合并完成")
+    # 启动动态采集器
+    dynamic_process_manager(policy_value_net, NUM_PROCESSES)

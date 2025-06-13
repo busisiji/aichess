@@ -1,7 +1,8 @@
+# -*- coding: utf-8 -*-
+
 import os
 import random
 import time
-
 import numpy as np
 import pickle
 from collections import deque, defaultdict
@@ -11,6 +12,11 @@ from game import Game, Board
 from mcts import MCTSPlayer
 from mcts_pure import MCTS_Pure
 from zip_array import decompress_game_data
+
+# 数据服务模块（统一 Redis / 文件）
+from data_service import DataManagementService
+
+# 根据配置选择网络框架
 if CONFIG['use_frame'] == 'pytorch':
     from pytorch_net import PolicyValueNet
 elif CONFIG['use_frame'] == 'paddle':
@@ -18,100 +24,120 @@ elif CONFIG['use_frame'] == 'paddle':
 else:
     raise NotImplementedError("暂不支持所选框架")
 
+
 class TrainPipeline:
 
     def __init__(self, init_model=None):
-        # 训练参数
+        # 游戏环境初始化
         self.board = Board()
         self.game = Game(self.board)
-        self.n_playout = CONFIG['play_out']
-        self.lr_multiplier = 1  # 学习率自适应调整
-        self.learn_rate = CONFIG['learn_rate',1e-3]
-        self.batch_size = CONFIG['batch_size']
-        self.c_puct = CONFIG['c_puct']
-        self.epochs = CONFIG['epochs']
-        self.kl_targ = CONFIG['kl_targ',0.02]  # kl散度控制
-        self.check_freq = CONFIG['check_freq',100] # 保存模型的频率
-        self.game_batch_num = CONFIG['game_batch_num']  # 训练更新的次数
+
+        # 训练参数
+        self.n_playout = CONFIG.get('play_out', 400)  # MCTS 搜索次数
+        self.lr_multiplier = 1.0  # 学习率自适应调整因子
+        self.learn_rate = CONFIG.get('learn_rate', 1e-3)
+        self.batch_size = CONFIG.get('batch_size', 512)
+        self.c_puct = CONFIG.get('c_puct', 5)
+        self.epochs = CONFIG.get('epochs', 5)
+        self.kl_targ = CONFIG.get('kl_targ', 0.02)  # KL散度目标
+        self.check_freq = CONFIG.get('check_freq', 100)  # 模型保存频率
+        self.game_batch_num = CONFIG.get('game_batch_num', 1000)  # 总训练轮数
         self.use_compression = CONFIG.get('use_data_compression', False)
-        self.temp = 1.0
+
+        # 初始化数据服务
+        self.data_service = DataManagementService(CONFIG)
+        self.data_buffer = self.data_service.data_buffer  # 共享缓冲区
+
+        # 加载检查点（断点续训）
+        self.checkpoint = self.data_service.checkpoint
+        self.iters = self.checkpoint.get('iters', 0)
+        self.model_path = self.checkpoint.get('model_path', None)
         self.best_win_ratio = 0.0
         self.pure_mcts_playout_num = 500
 
-        # 初始化数据缓冲区
-        self.data_buffer = deque(maxlen=CONFIG['buffer_size'])
-
         # 加载模型
-        if init_model:
+        if self.model_path:
             try:
-                self.policy_value_net = PolicyValueNet(model_file=init_model)
-                print('✅ 已加载上次模型:', init_model)
+                self.policy_value_net = PolicyValueNet(model_file=self.model_path)
+                print(f'✅ 已从上次模型继续训练: {self.model_path}')
             except Exception as e:
-                print('❌ 模型加载失败:', e)
+                print(f'❌ 模型加载失败: {e}')
                 self.policy_value_net = PolicyValueNet()
         else:
             print('🆕 从零开始训练')
             self.policy_value_net = PolicyValueNet()
+
     def run_continuously(self):
-        """持续训练模式，每隔一段时间检查是否有新数据加入"""
+        """持续训练模式：每隔一段时间检查是否有新数据加入"""
         try:
             while True:
-                if not CONFIG['use_redis']:
-                    # 从磁盘重新加载数据
-                    try:
-                        with open(CONFIG['train_data_buffer_path'], 'rb') as f:
-                            data_dict = pickle.load(f)
-                        raw_data = data_dict['data_buffer']
-                        if self.use_compression:
-                            new_data = decompress_game_data(raw_data)
-                        else:
-                            new_data = raw_data
+                # 刷新数据
+                new_data = self.data_service.refresh_data()
+                print(f"🔄 当前数据缓存大小: {len(self.data_buffer)}")
 
-                        self.data_buffer.extend(new_data)
-                        print(f"📥 已加载 {len(new_data)} 条新数据")
-
-                    except Exception as e:
-                        print(f"❌ 加载新数据失败: {e}")
-                else:
-                    # 从 Redis 获取新数据
-                    pass  # 略，根据你的 Redis 实现补充
-
-                # 检查数据是否足够并训练
-                if len(self.data_buffer) > self.batch_size:
+                # 如果数据足够则训练
+                if len(self.data_buffer) >= self.batch_size:
                     print("🏋️ 开始本轮训练")
-                    self.policy_update()
+                    loss, entropy = self.policy_update()
+                    self.iters += 1
+
+                    # 定期保存模型和检查点
+                    if self.iters % self.check_freq == 0:
+                        model_path = f'models/current_policy_iter_{self.iters}.model'
+                        self.policy_value_net.save_model(model_path)
+                        self.data_service.save_checkpoint(self.iters, model_path)
+                        print(f"💾 模型已保存至: {model_path}")
+
+                        # 每隔一定迭代评估胜率
+                        win_ratio = self.policy_evaluate(n_games=5)
+                        if win_ratio > self.best_win_ratio:
+                            best_model_path = f'models/best_policy_iter_{self.iters}.model'
+                            self.policy_value_net.save_model(best_model_path)
+                            self.best_win_ratio = win_ratio
+                            print(f"🏆 最佳模型更新，胜率: {win_ratio:.2f}")
                 else:
                     print("⏳ 数据不足，等待采集...")
 
                 time.sleep(10)  # 每隔10秒检查一次
         except KeyboardInterrupt:
-            print("\n\r🛑 训练已手动终止")
+            print("\n\r🛑 训练已手动终止，正在保存最终模型...")
+            final_model_path = CONFIG.get('final_model_path', 'models/final_policy.model')
+            self.policy_value_net.save_model(final_model_path)
+            self.data_service.save_checkpoint(self.iters, final_model_path)
+            print(f"✅ 最终模型已保存至: {final_model_path}")
+
     def policy_evaluate(self, n_games=10):
         """
-        Evaluate the trained policy by playing against the pure MCTS player
-        Note: this is only for monitoring the progress of training
+        对抗纯 MCTS 玩家评估策略性能
         """
-        current_mcts_player = MCTSPlayer(self.policy_value_net.policy_value_fn,
-                                         c_puct=self.c_puct,
-                                         n_playout=self.n_playout)
-        pure_mcts_player = MCTS_Pure(c_puct=5,
-                                     n_playout=self.pure_mcts_playout_num)
+        current_mcts_player = MCTSPlayer(
+            self.policy_value_net.policy_value_fn,
+            c_puct=self.c_puct,
+            n_playout=self.n_playout
+        )
+        pure_mcts_player = MCTS_Pure(c_puct=5, n_playout=self.pure_mcts_playout_num)
+
         win_cnt = defaultdict(int)
         for i in range(n_games):
-            winner = self.game.start_play(current_mcts_player,
-                                          pure_mcts_player,
-                                          start_player=i % 2 + 1,
-                                          is_shown=1)
+            winner = self.game.start_play(
+                current_mcts_player,
+                pure_mcts_player,
+                start_player=i % 2 + 1,
+                is_shown=1
+            )
             win_cnt[winner] += 1
-        win_ratio = 1.0*(win_cnt[1] + 0.5*win_cnt[-1]) / n_games
-        print("num_playouts:{}, win: {}, lose: {}, tie:{}".format(
-                self.pure_mcts_playout_num,
-                win_cnt[1], win_cnt[2], win_cnt[-1]))
+
+        win_ratio = 1.0 * (win_cnt[1] + 0.5 * win_cnt[-1]) / n_games
+        print(f"🎮 胜率: {win_ratio:.2f} (Win: {win_cnt[1]}, Lose: {win_cnt[2]}, Tie: {win_cnt[-1]})")
         return win_ratio
 
-
     def policy_update(self):
-        """更新策略价值网络"""
+        """
+        更新策略价值网络
+        """
+        if len(self.data_buffer) < self.batch_size:
+            raise ValueError("⚠️ 数据不足，无法训练")
+
         mini_batch = random.sample(self.data_buffer, self.batch_size)
         state_batch = [data[0] for data in mini_batch]
         mcts_probs_batch = [data[1] for data in mini_batch]
@@ -141,58 +167,48 @@ class TrainPipeline:
         elif kl < self.kl_targ / 2 and self.lr_multiplier < 10:
             self.lr_multiplier *= 1.5
 
-        print(f"KL: {kl:.5f}, LR Multiplier: {self.lr_multiplier:.3f}, Loss: {loss}, Entropy: {entropy}")
+        print(f"📊 KL: {kl:.5f}, LR Multiplier: {self.lr_multiplier:.3f}, Loss: {loss:.4f}, Entropy: {entropy:.4f}")
         return loss, entropy
 
     def run(self):
-        """开始训练"""
-        train_data_path = CONFIG['train_data_buffer_path']
-
-        # 一次性加载所有训练数据
-        print(f"📂 正在加载训练数据: {train_data_path}")
-        with open(train_data_path, 'rb') as f:
-            data_dict = pickle.load(f)
-
-        raw_data = data_dict['data_buffer']
-        if self.use_compression:
-            self.data_buffer.extend(decompress_game_data(raw_data))
-        else:
-            self.data_buffer.extend(raw_data)
+        """
+        单次训练流程（非持续训练）
+        """
+        print(f"📂 正在加载初始训练数据: {self.data_service.train_data_path}")
+        self.data_service.load_initial_data()
 
         print(f"📥 成功加载 {len(self.data_buffer)} 条数据")
 
-        # 开始训练
         for i in range(self.game_batch_num):
             if len(self.data_buffer) < self.batch_size:
                 print("⚠️ 数据不足，无法继续训练")
                 break
 
             print(f"🏋️ 第 {i+1} 轮训练开始")
-            loss, entropy = self.policy_update()
+            self.policy_update()
 
             # 定期保存模型
             if (i + 1) % self.check_freq == 0:
                 model_path = f'models/current_policy_batch_{i+1}.model'
                 self.policy_value_net.save_model(model_path)
+                self.data_service.save_checkpoint(i + 1, model_path)
                 print(f"💾 模型已保存至: {model_path}")
 
-        # 最终保存模型
+        # 最终保存
         final_model_path = CONFIG.get('final_model_path', 'models/final_policy.model')
         self.policy_value_net.save_model(final_model_path)
         print(f"🏁 训练完成，最终模型保存至: {final_model_path}")
-
 
 
 if __name__ == '__main__':
     init_model = CONFIG.get('init_model_path', None)
     training_pipeline = TrainPipeline(init_model=init_model)
 
-    if CONFIG['collect_and_train']:
+    if CONFIG.get('collect_and_train', False):
         print("🔄 正在同时进行采集和训练...")
         from collect_multi_thread import run_pipeline, dynamic_process_manager
         import threading
 
-        # 启动采集进程管理器作为后台线程
         def start_collector():
             shared_model = PolicyValueNet(model_file=init_model)
             dynamic_process_manager(shared_model, num_processes=CONFIG['num_processes'])
@@ -200,7 +216,7 @@ if __name__ == '__main__':
         collector_thread = threading.Thread(target=start_collector, daemon=True)
         collector_thread.start()
 
-        # 开始训练主循环（可定期从磁盘/Redis 获取新数据）
+        # 主线程运行训练
         training_pipeline.run_continuously()
     else:
         print("🆕 只进行训练，不启动采集")
