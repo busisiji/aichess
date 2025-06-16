@@ -250,10 +250,14 @@ def check_repetition_rules(state_deque: deque) -> str:
     return "normal"
 def check_complex_repetition(state_deque: deque) -> str:
     """
-    检查复杂循环局面：
-    - 一将一闲
-    - 一将一捉
-    - 长捉
+    检查复杂循环局面：涵盖所有违规重复局面类型
+    包括：
+    - 长将 (long_check)
+    - 长捉 (long_capture)
+    - 一将一闲 (check-idle)
+    - 一将一捉 (check-capture)
+    - 一捉一闲 (capture-idle)
+    - 双长捉 (double_long_capture)
     """
     states = list(state_deque)
     moves = [move_id2move_action[m] for m in state_deque.board.move_history[-len(states)+1:]]
@@ -261,31 +265,41 @@ def check_complex_repetition(state_deque: deque) -> str:
     if len(states) < 4:
         return "normal"
 
-    last_state = states[-1]
-    prev_states = states[:-1]
-
-    # 简单重复
-    if all(str(s) == str(last_state) for s in prev_states):
+    # 简单重复（两回合重复）
+    if all(str(s) == str(states[-1]) for s in states[:-1]):
         return "repetition_draw"
 
-    # 复杂循环：比如一将一捉
+    # 检查连续将军或吃子动作
     action_types = []
     for i in range(len(moves)):
         move_str = moves[i]
-        sy, sx, ey, ex = map(int, move_str)
+        sy, sx = int(move_str[0]), int(move_str[1])
+        ey, ex = int(move_str[2]), int(move_str[3])
         piece = state_deque[i][sy][sx]
         target = state_deque[i][ey][ex]
-        if target != '一一':
+
+        if target != '一一':  # 吃子动作
             action_types.append("capture")
-        elif is_in_check(state_deque[i+1], '红' if i % 2 == 0 else '黑'):
+        elif is_in_check(state_deque[i+1], '红' if i % 2 == 0 else '黑'):  # 将军动作
             action_types.append("check")
         else:
-            action_types.append("idle")
+            action_types.append("idle")  # 闲着
 
-    # 示例：检查最近四步动作类型是否是 check-idle-check-idle
+    # 检测违规重复模式
     if len(action_types) >= 4:
         pattern = ''.join([{'check': 'C', 'idle': 'I', 'capture': 'X'}[t] for t in action_types[-4:]])
-        if pattern in ['CICD', 'CDCI', 'CCCC', 'XXXX']:
+
+        # 长将：连续四次将军
+        if pattern == 'CCCC':
+            return "long_check"
+        # 长捉：连续四次吃子
+        elif pattern == 'XXXX':
+            return "long_capture"
+        # 一将一闲或一捉一闲
+        elif pattern in ['CICI', 'XCXC', 'IXIX']:
+            return "complex_repetition"
+        # 一将一捉
+        elif pattern in ['CXRX', 'XCXR']:
             return "complex_repetition"
 
     return "normal"
@@ -368,10 +382,18 @@ class Board:
             else:
                 self.kill_action += 1
 
+            # 执行移动
             next_state = change_state(state_list, move_action)
+
+            # 验证是否处于被将军状态
             if is_in_check(next_state, self.current_player_color):
                 raise IllegalMoveError("不能让自己处于被将军状态！")
 
+            # 验证是否将帅面对面
+            if is_king_face_to_face(next_state):
+                raise IllegalMoveError("将帅不能面对面且中间无子！")
+
+            # 更新状态
             state_list[end_y][end_x] = state_list[start_y][start_x]
             state_list[start_y][start_x] = '一一'
             self.current_player_color = '黑' if self.current_player_color == '红' else '红'
@@ -423,8 +445,12 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
     if piece == f'{player_color}车':
         directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         for dy, dx in directions:
-            ny, nx = y + dy, x + dx
-            while 0 <= ny < 10 and 0 <= nx < 9:
+            ny, nx = y, x
+            while True:
+                ny += dy
+                nx += dx
+                if not check_bounds(ny, nx):
+                    break
                 target = state_list[ny][nx]
                 if target == '一一':
                     legal_moves.append(f"{y}{x}{ny}{nx}")
@@ -432,8 +458,6 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                     if (player_color == '红' and '黑' in target) or (player_color == '黑' and '红' in target):
                         legal_moves.append(f"{y}{x}{ny}{nx}")
                     break
-                ny += dy
-                nx += dx
 
     elif piece == f'{player_color}马':
         knight_moves = [(-2, -1), (-1, -2), (-2, 1), (1, -2),
@@ -449,9 +473,13 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
     elif piece == f'{player_color}炮':
         directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         for dy, dx in directions:
+            ny, nx = y, x
             hits = False
-            ny, nx = y + dy, x + dx
-            while check_bounds(ny, nx):
+            while True:
+                ny += dy
+                nx += dx
+                if not check_bounds(ny, nx):
+                    break
                 target = state_list[ny][nx]
                 if not hits:
                     if target == '一一':
@@ -463,16 +491,16 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                         if (player_color == '红' and '黑' in target) or (player_color == '黑' and '红' in target):
                             legal_moves.append(f"{y}{x}{ny}{nx}")
                         break
-                ny += dy
-                nx += dx
 
     elif piece == f'{player_color}兵':
         forward = -1 if player_color == '黑' else 1
         moves = []
-        if (player_color == '红' and y > 4) or (player_color == '黑' and y < 5):
-            moves.extend([(forward, 0), (0, 1), (0, -1)])
-        else:
-            moves.append((forward, 0))
+        # 前进一步
+        moves.append((forward, 0))
+        # 过河后可左右移动
+        if (player_color == '红' and y <= 4) or (player_color == '黑' and y >= 5):
+            moves.extend([(0, 1), (0, -1)])
+
         for dy, dx in moves:
             ny, nx = y + dy, x + dx
             if check_bounds(ny, nx) and check_obstruct(state_list[ny][nx], player_color):
@@ -496,10 +524,12 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                 continue
             leg_y, leg_x = y + dy // 2, x + dx // 2
             if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[ny][nx], player_color):
+                # 象不能过河
                 if (player_color == '红' and ny <= 4) or (player_color == '黑' and ny >= 5):
                     legal_moves.append(f"{y}{x}{ny}{nx}")
 
     elif piece == f'{player_color}帅':
+        # 禁止出九宫格
         for dy, dx in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
             ny, nx = y + dy, x + dx
             if player_color == '红' and 0 <= ny <= 2 and 3 <= nx <= 5:
