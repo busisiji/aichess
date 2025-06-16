@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 棋盘游戏控制 - 完整封装版本
 """
@@ -5,7 +6,7 @@
 import time
 import numpy as np
 import copy
-from collections import deque
+from collections import deque, Counter
 from typing import List, Tuple, Dict, Set, Optional, Union
 
 from config import CONFIG
@@ -176,12 +177,6 @@ def is_king_face_to_face(state_list: List[List[str]]) -> bool:
 
 
 def is_in_check(state_list: List[List[str]], player_color: str) -> bool:
-    """
-    判断指定玩家是否处于被将军状态（包含单将、双将、闷宫等情况）
-    :param state_list: 当前棋盘状态
-    :param player_color: 玩家颜色（'红' 或 '黑'）
-    :return: True 表示被将军
-    """
     king_pos = None
     for y in range(10):
         for x in range(9):
@@ -211,10 +206,8 @@ def is_stalemate(state_deque: deque, current_player_color: str) -> bool:
     moves = get_legal_moves(state_deque, current_player_color)
     return len(moves) == 0 or is_suffocated(state_deque[-1], current_player_color)
 
+
 def is_suffocated(state_list: List[List[str]], player_color: str) -> bool:
-    """
-    判断是否处于"闷宫"状态：将帅被困无法移动但未被将军
-    """
     king_pos = None
     for y in range(10):
         for x in range(9):
@@ -226,50 +219,20 @@ def is_suffocated(state_list: List[List[str]], player_color: str) -> bool:
     if not king_pos:
         return False
 
-    # 获取将帅当前位置的所有合法移动
     legal_moves = get_piece_legal_moves(state_list, *king_pos, player_color)
-
-    # 如果没有合法移动，且未被将军，则为闷宫
     return len(legal_moves) == 0 and not is_in_check(state_list, player_color)
 
-def check_repetition_rules(state_deque: deque) -> str:
-    from collections import Counter
-    states = list(state_deque)
-    count = Counter(str(states[i]) for i in range(len(states)))
-    if len(count) == 1:
-        last_move = move_id2move_action[state_deque.board.last_move]
-        start_y, start_x = int(last_move[0]), int(last_move[1])
-        piece = state_deque.board.state_deque[-2][start_y][start_x]
-        target = state_deque.board.state_deque[-1][int(last_move[2])][int(last_move[3])]
-        if target != '一一':
-            return "long_capture"
-        elif is_in_check(state_deque.board.state_deque[-1], state_deque.board.get_current_player_color()):
-            return "long_check"
-    elif len(count) == 2:
-        return "repetition_draw"
-    return "normal"
+
 def check_complex_repetition(state_deque: deque) -> str:
-    """
-    检查复杂循环局面：涵盖所有违规重复局面类型
-    包括：
-    - 长将 (long_check)
-    - 长捉 (long_capture)
-    - 一将一闲 (check-idle)
-    - 一将一捉 (check-capture)
-    - 一捉一闲 (capture-idle)
-    - 双长捉 (double_long_capture)
-    """
     states = list(state_deque)
     moves = [move_id2move_action[m] for m in state_deque.board.move_history[-len(states)+1:]]
 
     if len(states) < 4:
         return "normal"
 
-    # 简单重复（两回合重复）
     if all(str(s) == str(states[-1]) for s in states[:-1]):
         return "repetition_draw"
 
-    # 检查连续将军或吃子动作
     action_types = []
     for i in range(len(moves)):
         move_str = moves[i]
@@ -278,27 +241,22 @@ def check_complex_repetition(state_deque: deque) -> str:
         piece = state_deque[i][sy][sx]
         target = state_deque[i][ey][ex]
 
-        if target != '一一':  # 吃子动作
+        if target != '一一':
             action_types.append("capture")
-        elif is_in_check(state_deque[i+1], '红' if i % 2 == 0 else '黑'):  # 将军动作
+        elif is_in_check(state_deque[i+1], '红' if i % 2 == 0 else '黑'):
             action_types.append("check")
         else:
-            action_types.append("idle")  # 闲着
+            action_types.append("idle")
 
-    # 检测违规重复模式
-    if len(action_types) >= 4:
-        pattern = ''.join([{'check': 'C', 'idle': 'I', 'capture': 'X'}[t] for t in action_types[-4:]])
+    if len(action_types) >= 6:
+        pattern = ''.join([{'check': 'C', 'idle': 'I', 'capture': 'X'}[t] for t in action_types[-6:]])
 
-        # 长将：连续四次将军
-        if pattern == 'CCCC':
+        if pattern == 'CCCCCC':
             return "long_check"
-        # 长捉：连续四次吃子
-        elif pattern == 'XXXX':
+        elif pattern == 'XXXXXX':
             return "long_capture"
-        # 一将一闲或一捉一闲
         elif pattern in ['CICI', 'XCXC', 'IXIX']:
             return "complex_repetition"
-        # 一将一捉
         elif pattern in ['CXRX', 'XCXR']:
             return "complex_repetition"
 
@@ -382,18 +340,14 @@ class Board:
             else:
                 self.kill_action += 1
 
-            # 执行移动
             next_state = change_state(state_list, move_action)
 
-            # 验证是否处于被将军状态
             if is_in_check(next_state, self.current_player_color):
                 raise IllegalMoveError("不能让自己处于被将军状态！")
 
-            # 验证是否将帅面对面
             if is_king_face_to_face(next_state):
                 raise IllegalMoveError("将帅不能面对面且中间无子！")
 
-            # 更新状态
             state_list[end_y][end_x] = state_list[start_y][start_x]
             state_list[start_y][start_x] = '一一'
             self.current_player_color = '黑' if self.current_player_color == '红' else '红'
@@ -494,10 +448,7 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
 
     elif piece == f'{player_color}兵':
         forward = -1 if player_color == '黑' else 1
-        moves = []
-        # 前进一步
-        moves.append((forward, 0))
-        # 过河后可左右移动
+        moves = [(forward, 0)]
         if (player_color == '红' and y <= 4) or (player_color == '黑' and y >= 5):
             moves.extend([(0, 1), (0, -1)])
 
@@ -524,12 +475,10 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                 continue
             leg_y, leg_x = y + dy // 2, x + dx // 2
             if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[ny][nx], player_color):
-                # 象不能过河
                 if (player_color == '红' and ny <= 4) or (player_color == '黑' and ny >= 5):
                     legal_moves.append(f"{y}{x}{ny}{nx}")
 
     elif piece == f'{player_color}帅':
-        # 禁止出九宫格
         for dy, dx in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
             ny, nx = y + dy, x + dx
             if player_color == '红' and 0 <= ny <= 2 and 3 <= nx <= 5:
@@ -552,7 +501,6 @@ def get_legal_moves(state_deque: deque, current_player_color: str) -> List[int]:
             piece = state_list[y][x]
             if piece == '一一':
                 continue
-
             if not piece.startswith(current_player_color):
                 continue
 
