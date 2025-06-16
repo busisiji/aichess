@@ -1,13 +1,11 @@
 """蒙特卡洛树搜索"""
-import threading
-from collections import Counter
 
 import numpy as np
 import copy
 from config import CONFIG
 
 # ✅ 新增 from game 导入 is_king_face_to_face 函数
-from game import is_king_face_to_face, move_id2move_action, change_state, is_move_into_check, apply_rules_pruning
+from game import is_king_face_to_face, move_id2move_action, change_state
 
 
 def softmax(x):
@@ -137,50 +135,40 @@ class MCTS(object):
         state:当前游戏的状态
         temp:介于（0， 1]之间的温度参数
         """
-        # 检查当前状态是否非法
-        if is_king_face_to_face(state.state_deque[-1]):
-            raise RuntimeError("当前棋盘状态违法：将帅面对面且中间无子")
 
-        # 获取合法走法
         legal_moves = state.availables
+        filtered_legal_moves = []
 
-        if not legal_moves:
+        # ✅ 过滤掉会导致非法状态的走法
+        for move in legal_moves:
+            move_str = move_id2move_action[move]
+            next_state = change_state(state.state_deque[-1], move_str)
+            if not is_king_face_to_face(next_state):
+                filtered_legal_moves.append(move)
+
+        if not filtered_legal_moves:
             print("没有合法走法，可能处于非法状态")
             return [], []
 
-        # 执行多次模拟
+        # ✅ 只保留合法动作的概率预测
         for n in range(self._n_playout):
             state_copy = copy.deepcopy(state)
             self._playout(state_copy)
 
         # 根据根节点处的访问计数来计算移动概率
         act_visits = [(act, node._n_visits)
-                      for act, node in self._root._children.items()
-                      if act in legal_moves]
+                      for act, node in self._root._children.items() if act in filtered_legal_moves]
 
         if not act_visits:
             # 没有访问任何合法节点，说明模拟路径都被过滤了
-            probs = np.zeros(len(legal_moves))
-            probs[:] = 1.0 / len(legal_moves)
-            return legal_moves, probs
+            probs = np.zeros(len(filtered_legal_moves))
+            probs[:] = 1.0 / len(filtered_legal_moves)
+            return filtered_legal_moves, probs
 
         acts, visits = zip(*act_visits)
         act_probs = softmax(1.0 / temp * np.log(np.array(visits) + 1e-10))
 
-        # 创建完整概率数组并应用规则剪枝
-        full_probs = np.zeros(2086)
-        for move, prob in zip(acts, act_probs):
-            full_probs[move] = prob
-
-        # 返回与state.availables对应的概率
-        move_probs = np.zeros(len(state.availables))
-        for i, move in enumerate(state.availables):
-            move_probs[i] = full_probs[move]
-
-        # 应用规则剪枝
-        move_probs = apply_rules_pruning(move_probs, state)
-
-        return state.availables, move_probs
+        return list(acts), act_probs
 
     def update_with_move(self, last_move):
         """

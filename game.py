@@ -44,11 +44,14 @@ def array2string(array):
 
 # 改变棋盘状态
 def change_state(state_list, move):
-    """move : 字符串'0010'"""
     copy_list = copy.deepcopy(state_list)
     y, x, toy, tox = int(move[0]), int(move[1]), int(move[2]), int(move[3])
     copy_list[toy][tox] = copy_list[y][x]
     copy_list[y][x] = '一一'
+
+    # ✅ 新增全局合法性检查
+    if is_king_face_to_face(copy_list):
+        raise ValueError("❌ 非法状态：将帅面对面且中间无子！")
     return copy_list
 
 
@@ -153,84 +156,8 @@ def check_obstruct(piece, current_player_color):
                 return False
     else:
         return True
-def is_in_check(state_list, color):
-    """
-    判断当前玩家是否处于“被将军”的状态。
-    即对方有一个合法走法可以吃掉己方的帅。
-    """
-    # 找到己方的帅的位置
-    king_pos = None
-    for y in range(10):
-        for x in range(9):
-            if (color == '红' and state_list[y][x] == '红帅') or \
-               (color == '黑' and state_list[y][x] == '黑帅'):
-                king_pos = (y, x)
-                break
-        if king_pos:
-            break
-
-    # 遍历所有敌方棋子，看看是否有能走到帅的位置
-    enemy_color = '黑' if color == '红' else '红'
-    for y in range(10):
-        for x in range(9):
-            piece = state_list[y][x]
-            if enemy_color in piece:
-                # 模拟这个棋子走到 king_pos 是否合法
-                move_str = f"{y}{x}{king_pos[0]}{king_pos[1]}"
-                next_state = change_state(state_list, move_str)
-                if move_str in [move_id2move_action[m] for m in get_legal_moves(deque([next_state], maxlen=4), enemy_color)]:
-                    return True
-    return False
-def is_move_into_check(state_list, move_str, current_player_color):
-    """
-    检查一个移动是否会导致送将（即移动后己方将帅处于被将军状态）
-    """
-    next_state = change_state(state_list, move_str)
-    return is_in_check(next_state, current_player_color)
-
-# 根据当前状态和动作过滤不合法的动作
-def apply_rules_pruning(policy, state):
-    """
-    根据当前棋盘状态，将不合法动作的概率设置为0，并重新归一化
-    """
-    legal_moves = state.availables
-    legal_mask = np.zeros_like(policy)
-    legal_mask[legal_moves] = 1
-
-    # 应用掩码并重新归一化
-    policy *= legal_mask
-    if policy.sum() > 0:
-        policy /= policy.sum()
-    else:
-        # 如果所有动作都被屏蔽，回退到均匀分布
-        policy = np.ones_like(policy) / len(policy)
-
-    return policy
 
 
-
-def filter_legal_moves(state_deque, moves, current_player_color):
-    """
-    过滤掉会导致送将或非法对脸的走法
-    """
-    state_list = state_deque[-1]
-    legal_moves = []
-
-    for move in moves:
-        move_str = move_id2move_action[move]
-        next_state = change_state(state_list, move_str)
-
-        # 排除导致将帅对脸的走法
-        if is_king_face_to_face(next_state):
-            continue
-
-        # 排除导致送将的走法
-        if is_move_into_check(state_list, move_str, current_player_color):
-            continue
-
-        legal_moves.append(move)
-
-    return legal_moves
 # 得到当前盘面合法走子集合
 # 输入状态队列不能小于10，current_player_color:当前玩家控制的棋子颜色
 # 用来存放合法走子的列表，例如[0, 1, 2, 1089, 2085]
@@ -238,255 +165,486 @@ def get_legal_moves(state_deque, current_player_color):
     state_list = state_deque[-1]
     old_state_list = state_deque[-4]
 
-    moves = []
+    moves = []  # 用来存放所有合法的走子方法
+    face_to_face = False  # 将军面对面
 
-    # 遍历棋盘
+    # 记录将军的位置信息
+    k_x = None
+    k_y = None
+    K_x = None
+    K_y = None
+
+    # state_list是以列表形式表示的, len(state_list) == 10, len(state_list[0]) == 9
+    # 遍历移动初始位置
     for y in range(10):
         for x in range(9):
+            # 只有是棋子才可以移动
             if state_list[y][x] == '一一':
                 continue
-
-            # 黑车
-            if state_list[y][x] == '黑车' and current_player_color == '黑':
-                directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]
-                for dy, dx in directions:
-                    ny, nx = y + dy, x + dx
-                    while check_bounds(ny, nx):
-                        if check_obstruct(state_list[ny][nx], current_player_color='黑'):
-                            m = f"{y}{x}{ny}{nx}"
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-                        if state_list[ny][nx] != '一一':
+            else:
+                if state_list[y][x] == '黑车' and current_player_color == '黑':  # 黑车的合法走子
+                    toY = y
+                    for toX in range(x - 1, -1, -1):
+                        # 前面是先前位置，后面是移动后的位置
+                        # 这里通过中断for循环实现了车的走子，车不能越过子
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '红' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
                             break
-                        ny += dy
-                        nx += dx
-
-            # 红车
-            elif state_list[y][x] == '红车' and current_player_color == '红':
-                directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]
-                for dy, dx in directions:
-                    ny, nx = y + dy, x + dx
-                    while check_bounds(ny, nx):
-                        if check_obstruct(state_list[ny][nx], current_player_color='红'):
-                            m = f"{y}{x}{ny}{nx}"
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-                        if state_list[ny][nx] != '一一':
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
+                    for toX in range(x + 1, 9):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '红' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
                             break
-                        ny += dy
-                        nx += dx
-
-            # 黑马
-            elif state_list[y][x] == '黑马' and current_player_color == '黑':
-                knight_moves = [
-                    (-2, -1), (-2, 1),
-                    (-1, -2), (-1, 2),
-                    (1, -2), (1, 2),
-                    (2, -1), (2, 1)
-                ]
-                for dy, dx in knight_moves:
-                    ny, nx = y + dy, x + dx
-                    if check_bounds(ny, nx):
-                        eye_y, eye_x = y + dy // 2, x + dx // 2
-                        if state_list[eye_y][eye_x] == '一一' and check_obstruct(state_list[ny][nx], current_player_color='黑'):
-                            m = f"{y}{x}{ny}{nx}"
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-
-            # 红马
-            elif state_list[y][x] == '红马' and current_player_color == '红':
-                knight_moves = [
-                    (-2, -1), (-2, 1),
-                    (-1, -2), (-1, 2),
-                    (1, -2), (1, 2),
-                    (2, -1), (2, 1)
-                ]
-                for dy, dx in knight_moves:
-                    ny, nx = y + dy, x + dx
-                    if check_bounds(ny, nx):
-                        eye_y, eye_x = y + dy // 2, x + dx // 2
-                        if state_list[eye_y][eye_x] == '一一' and check_obstruct(state_list[ny][nx], current_player_color='红'):
-                            m = f"{y}{x}{ny}{nx}"
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-
-            # 黑象
-            elif state_list[y][x] == '黑象' and current_player_color == '黑':
-                bishop_moves = [
-                    (2, 2), (2, -2),
-                    (-2, 2), (-2, -2)
-                ]
-                for dy, dx in bishop_moves:
-                    ny, nx = y + dy, x + dx
-                    if check_bounds(ny, nx) and ny >= 5:
-                        eye_y, eye_x = y + dy // 2, x + dx // 2
-                        if state_list[eye_y][eye_x] == '一一' and check_obstruct(state_list[ny][nx], current_player_color='黑'):
-                            m = f"{y}{x}{ny}{nx}"
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-
-            # 红象
-            elif state_list[y][x] == '红象' and current_player_color == '红':
-                bishop_moves = [
-                    (2, 2), (2, -2),
-                    (-2, 2), (-2, -2)
-                ]
-                for dy, dx in bishop_moves:
-                    ny, nx = y + dy, x + dx
-                    if check_bounds(ny, nx) and ny <= 4:
-                        eye_y, eye_x = y + dy // 2, x + dx // 2
-                        if state_list[eye_y][eye_x] == '一一' and check_obstruct(state_list[ny][nx], current_player_color='红'):
-                            m = f"{y}{x}{ny}{nx}"
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-
-            # 黑士
-            elif state_list[y][x] == '黑士' and current_player_color == '黑':
-                advisor_positions = {(7, 3), (7, 5), (8, 4), (9, 3), (9, 5)}
-                for ty, tx in advisor_positions:
-                    if check_obstruct(state_list[ty][tx], current_player_color='黑'):
-                        m = f"{y}{x}{ty}{tx}"
                         if change_state(state_list, m) != old_state_list:
                             moves.append(m)
 
-            # 红士
-            elif state_list[y][x] == '红士' and current_player_color == '红':
-                advisor_positions = {(0, 3), (0, 5), (1, 4), (2, 3), (2, 5)}
-                for ty, tx in advisor_positions:
-                    if check_obstruct(state_list[ty][tx], current_player_color='红'):
-                        m = f"{y}{x}{ty}{tx}"
+                    toX = x
+                    for toY in range(y - 1, -1, -1):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '红' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                            break
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
+                    for toY in range(y + 1, 10):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '红' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                            break
                         if change_state(state_list, m) != old_state_list:
                             moves.append(m)
 
-            # 黑帅
-            elif state_list[y][x] == '黑帅' and current_player_color == '黑':
-                king_positions = {(7, 3), (7, 4), (7, 5),
-                                  (8, 3), (8, 4), (8, 5),
-                                  (9, 3), (9, 4), (9, 5)}
-                for ty, tx in king_positions:
-                    if check_obstruct(state_list[ty][tx], current_player_color='黑'):
-                        m = f"{y}{x}{ty}{tx}"
-                        next_state = change_state(state_list, m)
-                        if not is_king_face_to_face(next_state):
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-
-            # 红帅
-            elif state_list[y][x] == '红帅' and current_player_color == '红':
-                king_positions = {(0, 3), (0, 4), (0, 5),
-                                  (1, 3), (1, 4), (1, 5),
-                                  (2, 3), (2, 4), (2, 5)}
-                for ty, tx in king_positions:
-                    if check_obstruct(state_list[ty][tx], current_player_color='红'):
-                        m = f"{y}{x}{ty}{tx}"
-                        next_state = change_state(state_list, m)
-                        if not is_king_face_to_face(next_state):
-                            if change_state(state_list, m) != old_state_list:
-                                moves.append(m)
-
-            # 黑炮
-            elif state_list[y][x] == '黑炮' and current_player_color == '黑':
-                directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]
-                for dy, dx in directions:
-                    step = 1
-                    hit_flag = False
-                    while True:
-                        ny, nx = y + dy * step, x + dx * step
-                        if not check_bounds(ny, nx):
+                elif state_list[y][x] == '红车' and current_player_color == '红':  # 红车的合法走子
+                    toY = y
+                    for toX in range(x - 1, -1, -1):
+                        # 前面是先前位置，后面是移动后的位置
+                        # 这里通过中断for循环实现了，车不能越过子
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '黑' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
                             break
-                        if not hit_flag:
-                            if state_list[ny][nx] != '一一':
-                                hit_flag = True
-                        else:
-                            if state_list[ny][nx] != '一一':
-                                if '红' in state_list[ny][nx]:
-                                    m = f"{y}{x}{ny}{nx}"
-                                    if change_state(state_list, m) != old_state_list:
-                                        moves.append(m)
-                                break
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
+                    for toX in range(x + 1, 9):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '黑' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
                             break
-                        step += 1
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
 
-            # 红炮
-            elif state_list[y][x] == '红炮' and current_player_color == '红':
-                directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]
-                for dy, dx in directions:
-                    step = 1
-                    hit_flag = False
-                    while True:
-                        ny, nx = y + dy * step, x + dx * step
-                        if not check_bounds(ny, nx):
+                    toX = x
+                    for toY in range(y - 1, -1, -1):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '黑' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
                             break
-                        if not hit_flag:
-                            if state_list[ny][nx] != '一一':
-                                hit_flag = True
-                        else:
-                            if state_list[ny][nx] != '一一':
-                                if '黑' in state_list[ny][nx]:
-                                    m = f"{y}{x}{ny}{nx}"
-                                    if change_state(state_list, m) != old_state_list:
-                                        moves.append(m)
-                                break
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
+                    for toY in range(y + 1, 10):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if state_list[toY][toX] != '一一':
+                            if '黑' in state_list[toY][toX]:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
                             break
-                        step += 1
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
 
-            # 黑兵
-            elif state_list[y][x] == '黑兵' and current_player_color == '黑':
-                if y > 0:
-                    for dx in [-1, 0, 1]:
-                        nx = x + dx
-                        if check_bounds(y - 1, nx):
-                            if check_obstruct(state_list[y - 1][nx], current_player_color='黑'):
-                                m = f"{y}{x}{y-1}{nx}"
+                # 黑马的合理走法
+                elif state_list[y][x] == '黑马' and current_player_color == '黑':
+                    for i in range(-1, 3, 2):
+                        for j in range(-1, 3, 2):
+                            toY = y + 2 * i
+                            toX = x + 1 * j
+                            if check_bounds(toY, toX) \
+                                    and check_obstruct(state_list[toY][toX], current_player_color='黑') \
+                                    and state_list[toY - i][x] == '一一':
+                                m = str(y) + str(x) + str(toY) + str(toX)
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                            toY = y + 1 * i
+                            toX = x + 2 * j
+                            if check_bounds(toY, toX) \
+                                    and check_obstruct(state_list[toY][toX], current_player_color='黑') \
+                                    and state_list[y][toX - j] == '一一':
+                                m = str(y) + str(x) + str(toY) + str(toX)
                                 if change_state(state_list, m) != old_state_list:
                                     moves.append(m)
 
-            # 红兵
-            elif state_list[y][x] == '红兵' and current_player_color == '红':
-                if y < 9:
-                    for dx in [-1, 0, 1]:
-                        nx = x + dx
-                        if check_bounds(y + 1, nx):
-                            if check_obstruct(state_list[y + 1][nx], current_player_color='红'):
-                                m = f"{y}{x}{y+1}{nx}"
+                # 红马的合理走法
+                elif state_list[y][x] == '红马' and current_player_color == '红':
+                    for i in range(-1, 3, 2):
+                        for j in range(-1, 3, 2):
+                            toY = y + 2 * i
+                            toX = x + 1 * j
+                            if check_bounds(toY, toX) \
+                                    and check_obstruct(state_list[toY][toX], current_player_color='红') \
+                                    and state_list[toY - i][x] == '一一':
+                                m = str(y) + str(x) + str(toY) + str(toX)
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                            toY = y + 1 * i
+                            toX = x + 2 * j
+                            if check_bounds(toY, toX) \
+                                    and check_obstruct(state_list[toY][toX], current_player_color='红') \
+                                    and state_list[y][toX - j] == '一一':
+                                m = str(y) + str(x) + str(toY) + str(toX)
                                 if change_state(state_list, m) != old_state_list:
                                     moves.append(m)
 
-    # 检查是否进入非法对脸状态
-    for move in list(moves):  # 使用副本避免修改迭代对象
-        move_str = move_id2move_action[move]
-        next_state = change_state(state_list, move_str)
+                # 黑象的合理走法
+                elif state_list[y][x] == '黑象' and current_player_color == '黑':
+                    for i in range(-2, 3, 4):
+                        toY = y + i
+                        toX = x + i
+                        if check_bounds(toY, toX) \
+                                and check_obstruct(state_list[toY][toX], current_player_color='黑') \
+                                and toY >= 5 and state_list[y + i // 2][x + i // 2] == '一一':
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+                        toY = y + i
+                        toX = x - i
+                        if check_bounds(toY, toX) \
+                                and check_obstruct(state_list[toY][toX], current_player_color='黑') \
+                                and toY >= 5 and state_list[y + i // 2][x - i // 2] == '一一':
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+
+                # 红象的合理走法
+                elif state_list[y][x] == '红象' and current_player_color == '红':
+                    for i in range(-2, 3, 4):
+                        toY = y + i
+                        toX = x + i
+                        if check_bounds(toY, toX) \
+                                and check_obstruct(state_list[toY][toX], current_player_color='红') \
+                                and toY <= 4 and state_list[y + i // 2][x + i // 2] == '一一':
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+                        toY = y + i
+                        toX = x - i
+                        if check_bounds(toY, toX) \
+                                and check_obstruct(state_list[toY][toX], current_player_color='红') \
+                                and toY <= 4 and state_list[y + i // 2][x - i // 2] == '一一':
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+
+                # 黑士的合理走法
+                elif state_list[y][x] == '黑士' and current_player_color == '黑':
+                    for i in range(-1, 3, 2):
+                        toY = y + i
+                        toX = x + i
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑') \
+                                and toY >= 7 and 3 <= toX <= 5:
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+                        toY = y + i
+                        toX = x - i
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑') \
+                                and toY >= 7 and 3 <= toX <= 5:
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+
+                # 红士的合理走法
+                elif state_list[y][x] == '红士' and current_player_color == '红':
+                    for i in range(-1, 3, 2):
+                        toY = y + i
+                        toX = x + i
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红') \
+                                and toY <= 2 and 3 <= toX <= 5:
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+                        toY = y + i
+                        toX = x - i
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红') \
+                                and toY <= 2 and 3 <= toX <= 5:
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+
+                # 黑帅的合理走法
+                elif state_list[y][x] == '黑帅':
+                    k_x = x
+                    k_y = y
+                    if current_player_color == '黑':
+                        for i in range(2):
+                            for sign in range(-1, 2, 2):
+                                j = 1 - i
+                                toY = y + i * sign
+                                toX = x + j * sign
+
+                                if check_bounds(toY, toX) and check_obstruct(
+                                        state_list[toY][toX], current_player_color='黑') and toY >= 7 and 3 <= toX <= 5:
+                                    m = str(y) + str(x) + str(toY) + str(toX)
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+
+                # 红帅的合理走法
+                elif state_list[y][x] == '红帅':
+                    K_x = x
+                    K_y = y
+                    if current_player_color == '红':
+                        for i in range(2):
+                            for sign in range(-1, 2, 2):
+                                j = 1 - i
+                                toY = y + i * sign
+                                toX = x + j * sign
+
+                                if check_bounds(toY, toX) and check_obstruct(
+                                        state_list[toY][toX], current_player_color='红') and toY <= 2 and 3 <= toX <= 5:
+                                    m = str(y) + str(x) + str(toY) + str(toX)
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+
+                # 黑炮的合理走法
+                elif state_list[y][x] == '黑炮' and current_player_color == '黑':
+                    toY = y
+                    hits = False
+                    for toX in range(x - 1, -1, -1):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '红' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+                    hits = False
+                    for toX in range(x + 1, 9):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '红' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+
+                    toX = x
+                    hits = False
+                    for toY in range(y - 1, -1, -1):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '红' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+                    hits = False
+                    for toY in range(y + 1, 10):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '红' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+
+                # 红炮的合理走法
+                elif state_list[y][x] == '红炮' and current_player_color == '红':
+                    toY = y
+                    hits = False
+                    for toX in range(x - 1, -1, -1):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '黑' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+                    hits = False
+                    for toX in range(x + 1, 9):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '黑' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+
+                    toX = x
+                    hits = False
+                    for toY in range(y - 1, -1, -1):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '黑' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+                    hits = False
+                    for toY in range(y + 1, 10):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if hits is False:
+                            if state_list[toY][toX] != '一一':
+                                hits = True
+                            else:
+                                if change_state(state_list, m) != old_state_list:
+                                    moves.append(m)
+                        else:
+                            if state_list[toY][toX] != '一一':
+                                if '黑' in state_list[toY][toX]:
+                                    if change_state(state_list, m) != old_state_list:
+                                        moves.append(m)
+                                break
+
+                # 黑兵的合法走子
+                elif state_list[y][x] == '黑兵' and current_player_color == '黑':
+                    toY = y - 1
+                    toX = x
+                    if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
+                    # 小兵过河
+                    if y < 5:
+                        toY = y
+                        toX = x + 1
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+                        toX = x - 1
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+
+                # 红兵的合法走子
+                elif state_list[y][x] == '红兵' and current_player_color == '红':
+                    toY = y + 1
+                    toX = x
+                    if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红'):
+                        m = str(y) + str(x) + str(toY) + str(toX)
+                        if change_state(state_list, m) != old_state_list:
+                            moves.append(m)
+                    # 小兵过河
+                    if y > 4:
+                        toY = y
+                        toX = x + 1
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红'):
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+                        toX = x - 1
+                        if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红'):
+                            m = str(y) + str(x) + str(toY) + str(toX)
+                            if change_state(state_list, m) != old_state_list:
+                                moves.append(m)
+
+    # 检查将帅是否对面且中间无子
+    if is_king_face_to_face(state_list):
+        raise Exception("将帅不能直接面对且中间无子")
+
+    # 将帅不能导致进入非法对脸状态
+    for move in moves[:]:  # 使用副本避免修改迭代对象
+        next_state = change_state(state_list, move)
         if is_king_face_to_face(next_state):
             moves.remove(move)
 
-    # 检查是否走入“被将军”状态
-    for move in list(moves):
-        move_str = move_id2move_action[move]
-        next_state = change_state(state_list, move_str)
-        if is_in_check(next_state, current_player_color):
-            moves.remove(move)
 
-    # 过滤掉会导致送将或非法对脸的走法
-    filtered_moves = []
+    moves_id = []
     for move in moves:
-        move_str = move_id2move_action[move]
-        next_state = change_state(state_list, move_str)
+        moves_id.append(move_action2move_id[move])
+    return moves_id
 
-        # 检查是否将帅对脸
-        if is_king_face_to_face(next_state):
-            continue
+def is_in_check(state_list, player_color):
+    """
+    判断指定玩家是否处于被将军状态
+    :param state_list: 当前棋盘状态
+    :param player_color: 玩家颜色（'红' 或 '黑'）
+    :return: True 表示被将军
+    """
+    # 找到己方帅的位置
+    king_pos = None
+    for y in range(10):
+        for x in range(9):
+            if player_color == '红' and state_list[y][x] == '红帅':
+                king_pos = (y, x)
+            elif player_color == '黑' and state_list[y][x] == '黑帅':
+                king_pos = (y, x)
 
-        # 检查是否送将
-        if is_move_into_check(state_list, move_str, current_player_color):
-            continue
+    if not king_pos:
+        return False
 
-        filtered_moves.append(move)
+    opponent_color = '黑' if player_color == '红' else '红'
 
-    return filtered_moves
+    # 检查是否有敌方棋子可以吃掉己方帅
+    for y in range(10):
+        for x in range(9):
+            piece = state_list[y][x]
+            if piece.startswith(opponent_color):
+                legal_moves = get_piece_legal_moves(state_list, y, x, player_color=opponent_color)
+                for move_str in legal_moves:
+                    if move_str.endswith(f"{king_pos[0]}{king_pos[1]}"):
+                        return True
+    return False
 
-# 检查重复局面（平局判负）
-def is_repetition(state_deque):
-    return state_deque.count(state_deque[-1]) >= 3
+
 def is_king_face_to_face(state_list):
     """
     检查当前棋盘是否违反将帅不能直接照面的规则。
@@ -530,6 +688,29 @@ def is_king_face_to_face(state_list):
 
     # 中间全是空位，说明将帅面对面且无遮挡，违规
     return True
+
+def check_repetition_rules(state_deque):
+    """
+    检查是否出现重复局面，并区分类型（长将、长捉等）
+    :param state_deque: 最近4个状态
+    :return: "long_check", "long_capture", "normal"
+    """
+    from collections import Counter
+
+    states = list(state_deque)
+    count = Counter(str(states[i]) for i in range(len(states)))
+
+    if len(count) == 1:
+        # 连续四次相同局面
+        last_move = move_id2move_action[state_deque.board.last_move]
+        start_y, start_x = int(last_move[0]), int(last_move[1])
+        piece = state_deque.board.state_deque[-2][start_y][start_x]
+        target = state_deque.board.state_deque[-1][int(last_move[2])][int(last_move[3])]
+        if target != '一一':
+            return "long_capture"  # 长捉
+        elif is_in_check(state_deque.board.state_deque[-1], state_deque.board.get_current_player_color()):
+            return "long_check"  # 长将
+    return "normal"
 
 
 # 棋盘逻辑控制
@@ -597,31 +778,43 @@ class Board(object):
         return _current_state.copy()
 
     # 根据move对棋盘状态做出改变
+    # 在 do_move 方法中增加对“将军”的处理逻辑
     def do_move(self, move):
-        self.game_start = True  # 游戏开始
-        self.action_count += 1  # 移动次数加1
-        move_action = move_id2move_action[move]
-        start_y, start_x = int(move_action[0]), int(move_action[1])
-        end_y, end_x = int(move_action[2]), int(move_action[3])
-        state_list = copy.deepcopy(self.state_deque[-1])
-        # 判断是否吃子
-        if state_list[end_y][end_x] != '一一':
-            # 如果吃掉对方的帅，则返回当前的current_player胜利
-            self.kill_action = 0
-            if self.current_player_color == '黑' and state_list[end_y][end_x] == '红帅':
-                self.winner = self.color2id['黑']
-            elif self.current_player_color == '红' and state_list[end_y][end_x] == '黑帅':
-                self.winner = self.color2id['红']
-        else:
-            self.kill_action += 1
-        # 更改棋盘状态
-        state_list[end_y][end_x] = state_list[start_y][start_x]
-        state_list[start_y][start_x] = '一一'
-        self.current_player_color = '黑' if self.current_player_color == '红' else '红'  # 改变当前玩家
-        self.current_player_id = 1 if self.current_player_id == 2 else 2
-        # 记录最后一次移动的位置
-        self.last_move = move
-        self.state_deque.append(state_list)
+        try:
+            self.game_start = True
+            self.action_count += 1
+            move_action = move_id2move_action[move]
+            start_y, start_x = int(move_action[0]), int(move_action[1])
+            end_y, end_x = int(move_action[2]), int(move_action[3])
+
+            state_list = copy.deepcopy(self.state_deque[-1])
+
+            # 判断是否吃子
+            if state_list[end_y][end_x] != '一一':
+                self.kill_action = 0
+                if self.current_player_color == '黑' and state_list[end_y][end_x] == '红帅':
+                    self.winner = self.color2id['黑']
+                elif self.current_player_color == '红' and state_list[end_y][end_x] == '黑帅':
+                    self.winner = self.color2id['红']
+            else:
+                self.kill_action += 1
+
+            # 模拟移动后的棋盘
+            next_state_list = change_state(state_list, move_action)
+            # ✅ 新增：检查是否导致己方进入被将军状态
+            if is_in_check(next_state_list, self.current_player_color):
+                raise ValueError("❌ 走法非法：不能让自己处于被将军状态！")
+
+            # 更改棋盘状态
+            state_list[end_y][end_x] = state_list[start_y][start_x]
+            state_list[start_y][start_x] = '一一'
+            self.current_player_color = '黑' if self.current_player_color == '红' else '红'
+            self.current_player_id = 1 if self.current_player_id == 2 else 2
+            self.last_move = move
+            self.state_deque.append(state_list)
+        except Exception as e:
+            print(f"[错误] 动作 {move} 导致异常: {e}")
+            return False  # 返回失败标志
 
     # 是否产生赢家
     def has_a_winner(self):
@@ -636,6 +829,8 @@ class Board(object):
     # 检查当前棋局是否结束
     def game_end(self):
         win, winner = self.has_a_winner()
+        if check_repetition_rules(self.state_deque) in ["long_check", "long_capture"]:
+            return True, self.backhand_player
         if win:
             return True, winner
         elif self.kill_action >= CONFIG['kill_action']:  # 平局，没有赢家
@@ -648,6 +843,312 @@ class Board(object):
     def get_current_player_id(self):
         return self.current_player_id
 
+def get_piece_legal_moves(state_list, y, x, player_color='红'):
+    """
+    获取指定位置棋子的所有合法走法
+    :param state_list: 当前棋盘状态（二维列表）
+    :param y: 起始行坐标
+    :param x: 起始列坐标
+    :param player_color: 当前玩家颜色
+    :return: 合法走法字符串列表，例如 ['0111', '0212']
+    """
+    piece = state_list[y][x]
+    if piece == '一一':
+        return []
+
+    legal_moves = []
+
+    # 红车
+    if piece == '红车':
+        # 横向左
+        for toX in range(x - 1, -1, -1):
+            m = f"{y}{x}{y}{toX}"
+            if state_list[y][toX] != '一一':
+                if '黑' in state_list[y][toX]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+        # 横向右
+        for toX in range(x + 1, 9):
+            m = f"{y}{x}{y}{toX}"
+            if state_list[y][toX] != '一一':
+                if '黑' in state_list[y][toX]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+        # 纵向上
+        for toY in range(y - 1, -1, -1):
+            m = f"{y}{x}{toY}{x}"
+            if state_list[toY][x] != '一一':
+                if '黑' in state_list[toY][x]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+        # 纵向下
+        for toY in range(y + 1, 10):
+            m = f"{y}{x}{toY}{x}"
+            if state_list[toY][x] != '一一':
+                if '黑' in state_list[toY][x]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+
+    # 黑车
+    elif piece == '黑车':
+        # 横向左
+        for toX in range(x - 1, -1, -1):
+            m = f"{y}{x}{y}{toX}"
+            if state_list[y][toX] != '一一':
+                if '红' in state_list[y][toX]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+        # 横向右
+        for toX in range(x + 1, 9):
+            m = f"{y}{x}{y}{toX}"
+            if state_list[y][toX] != '一一':
+                if '红' in state_list[y][toX]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+        # 纵向上
+        for toY in range(y - 1, -1, -1):
+            m = f"{y}{x}{toY}{x}"
+            if state_list[toY][x] != '一一':
+                if '红' in state_list[toY][x]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+        # 纵向下
+        for toY in range(y + 1, 10):
+            m = f"{y}{x}{toY}{x}"
+            if state_list[toY][x] != '一一':
+                if '红' in state_list[toY][x]:
+                    legal_moves.append(m)
+                break
+            legal_moves.append(m)
+
+    # 红马
+    elif piece == '红马':
+        knight_moves = [(-2, -1), (-1, -2), (-2, 1), (1, -2), (2, -1), (-1, 2), (2, 1), (1, 2)]
+        for dy, dx in knight_moves:
+            toY, toX = y + dy, x + dx
+            if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红'):
+                leg_y, leg_x = y + dy // 2, x + dx // 2 if abs(dx) > abs(dy) else x + dx * 2 // 3
+                if state_list[leg_y][leg_x] == '一一':
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 黑马
+    elif piece == '黑马':
+        knight_moves = [(-2, -1), (-1, -2), (-2, 1), (1, -2), (2, -1), (-1, 2), (2, 1), (1, 2)]
+        for dy, dx in knight_moves:
+            toY, toX = y + dy, x + dx
+            if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                leg_y, leg_x = y + dy // 2, x + dx // 2 if abs(dx) > abs(dy) else x + dx * 2 // 3
+                if state_list[leg_y][leg_x] == '一一':
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 红炮
+    elif piece == '红炮':
+        # 横向左
+        hits = False
+        for toX in range(x - 1, -1, -1):
+            m = f"{y}{x}{y}{toX}"
+            if not hits:
+                if state_list[y][toX] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[y][toX] != '一一':
+                    if '黑' in state_list[y][toX]:
+                        legal_moves.append(m)
+                    break
+        # 横向右
+        hits = False
+        for toX in range(x + 1, 9):
+            m = f"{y}{x}{y}{toX}"
+            if not hits:
+                if state_list[y][toX] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[y][toX] != '一一':
+                    if '黑' in state_list[y][toX]:
+                        legal_moves.append(m)
+                    break
+        # 纵向上
+        hits = False
+        for toY in range(y - 1, -1, -1):
+            m = f"{y}{x}{toY}{x}"
+            if not hits:
+                if state_list[toY][x] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[toY][x] != '一一':
+                    if '黑' in state_list[toY][x]:
+                        legal_moves.append(m)
+                    break
+        # 纵向下
+        hits = False
+        for toY in range(y + 1, 10):
+            m = f"{y}{x}{toY}{x}"
+            if not hits:
+                if state_list[toY][x] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[toY][x] != '一一':
+                    if '黑' in state_list[toY][x]:
+                        legal_moves.append(m)
+                    break
+
+    # 黑炮
+    elif piece == '黑炮':
+        # 横向左
+        hits = False
+        for toX in range(x - 1, -1, -1):
+            m = f"{y}{x}{y}{toX}"
+            if not hits:
+                if state_list[y][toX] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[y][toX] != '一一':
+                    if '红' in state_list[y][toX]:
+                        legal_moves.append(m)
+                    break
+        # 横向右
+        hits = False
+        for toX in range(x + 1, 9):
+            m = f"{y}{x}{y}{toX}"
+            if not hits:
+                if state_list[y][toX] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[y][toX] != '一一':
+                    if '红' in state_list[y][toX]:
+                        legal_moves.append(m)
+                    break
+        # 纵向上
+        hits = False
+        for toY in range(y - 1, -1, -1):
+            m = f"{y}{x}{toY}{x}"
+            if not hits:
+                if state_list[toY][x] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[toY][x] != '一一':
+                    if '红' in state_list[toY][x]:
+                        legal_moves.append(m)
+                    break
+        # 纵向下
+        hits = False
+        for toY in range(y + 1, 10):
+            m = f"{y}{x}{toY}{x}"
+            if not hits:
+                if state_list[toY][x] != '一一':
+                    hits = True
+                else:
+                    legal_moves.append(m)
+            else:
+                if state_list[toY][x] != '一一':
+                    if '红' in state_list[toY][x]:
+                        legal_moves.append(m)
+                    break
+
+    # 红兵
+    elif piece == '红兵':
+        # 未过河
+        if y <= 4:
+            for dy, dx in [(1, 0)]:
+                toY, toX = y + dy, x
+                if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+        # 过河
+        else:
+            for dy, dx in [(1, 0), (0, 1), (0, -1)]:
+                toY, toX = y + dy, x + dx
+                if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='红'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 黑兵
+    elif piece == '黑兵':
+        # 未过河
+        if y >= 5:
+            for dy, dx in [(-1, 0)]:
+                toY, toX = y + dy, x
+                if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+        # 过河
+        else:
+            for dy, dx in [(-1, 0), (0, 1), (0, -1)]:
+                toY, toX = y + dy, x + dx
+                if check_bounds(toY, toX) and check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 红帅
+    elif piece == '红帅':
+        for dy, dx in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
+            toY, toX = y + dy, x + dx
+            if 0 <= toY <= 2 and 3 <= toX <= 5:
+                if check_obstruct(state_list[toY][toX], current_player_color='红'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 黑帅
+    elif piece == '黑帅':
+        for dy, dx in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
+            toY, toX = y + dy, x + dx
+            if 7 <= toY <= 9 and 3 <= toX <= 5:
+                if check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 红士
+    elif piece == '红士':
+        for dy, dx in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+            toY, toX = y + dy, x + dx
+            if 0 <= toY <= 2 and 3 <= toX <= 5:
+                if check_obstruct(state_list[toY][toX], current_player_color='红'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 黑士
+    elif piece == '黑士':
+        for dy, dx in [(-1, -1), (-1, 1), (1, -1), (1, 1)]:
+            toY, toX = y + dy, x + dx
+            if 7 <= toY <= 9 and 3 <= toX <= 5:
+                if check_obstruct(state_list[toY][toX], current_player_color='黑'):
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 红象
+    elif piece == '红象':
+        elephant_moves = [(-2, -2), (-2, 2), (2, -2), (2, 2)]
+        for dy, dx in elephant_moves:
+            toY, toX = y + dy, x + dx
+            if 0 <= toY <= 9 and 0 <= toX <= 8:
+                leg_y, leg_x = y + dy // 2, x + dx // 2
+                if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[toY][toX], current_player_color='红') and toY <= 4:
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    # 黑象
+    elif piece == '黑象':
+        elephant_moves = [(-2, -2), (-2, 2), (2, -2), (2, 2)]
+        for dy, dx in elephant_moves:
+            toY, toX = y + dy, x + dx
+            if 0 <= toY <= 9 and 0 <= toX <= 8:
+                leg_y, leg_x = y + dy // 2, x + dx // 2
+                if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[toY][toX], current_player_color='黑') and toY >= 5:
+                    legal_moves.append(f"{y}{x}{toY}{toX}")
+
+    return legal_moves
 
 # 在Board类基础上定义Game类，该类用于启动并控制一整局对局的完整流程，并收集对局过程中的数据，以及进行棋盘的展示
 class Game(object):
@@ -735,59 +1236,6 @@ class Game(object):
 
                 return winner, zip(states, mcts_probs, winner_z)
 
-
-if __name__ == '__main__':
-    # 测试array2string
-    # _array = np.array([0, 0, 0, 0, 0, 0, 0])
-    # print(array2num(_array))
-
-    """# 测试change_state
-    new_state = change_state(state_list_init, move='0010')
-    for row in range(10):
-        print(new_state[row])"""
-
-    """# 测试print_board
-    _state_list = copy.deepcopy(state_list_init)
-    print_board(state_list2state_array(_state_list))"""
-
-    """# 测试get_legal_moves
-    moves = get_legal_moves(state_deque_init, current_player_color='黑')
-    move_actions = []
-    for item in moves:
-        move_actions.append(move_id2move_action[item])
-    print(move_actions)"""
-
-    # 测试Board中的start_play
-    # class Human1:
-    #     def get_action(self, board):
-    #         # print('当前是player1在操作')
-    #         # print(board.current_player_color)
-    #         # move = move_action2move_id[input('请输入')]
-    #         move = random.choice(board.availables)
-    #         return move
-    #
-    #     def set_player_ind(self, p):
-    #         self.player = p
-    #
-    #
-    # class Human2:
-    #     def get_action(self, board):
-    #         # print('当前是player2在操作')
-    #         # print(board.current_player_color)
-    #         # move = move_action2move_id[input('请输入')]
-    #         move = random.choice(board.availables)
-    #         return move
-    #
-    #     def set_player_ind(self, p):
-    #         self.player = p
-    #
-    # human1 = Human1()
-    # human2 = Human2()
-    # game = Game(board=Board())
-    # for i in range(20):
-    #     game.start_play(human1, human2, start_player=2, is_shown=0)
-    board = Board()
-    board.init_board()
 
 
 
