@@ -94,13 +94,15 @@ class Net(nn.Layer):
 # 策略值网络，用来进行模型的训练
 class PolicyValueNet:
 
-    def __init__(self, model_file=None, use_gpu=True):
+    def __init__(self, model_file=None, use_gpu=True, device='gpu'):
         self.use_gpu = use_gpu
         self.l2_const = 2e-3    # l2 正则化
         self.policy_value_net = Net()
         self.optimizer = paddle.optimizer.Adam(learning_rate=0.001,
                                                parameters=self.policy_value_net.parameters(),
                                                weight_decay=self.l2_const)
+        self.device = device
+        # paddle.set_device(device)
         if model_file:
             net_params = paddle.load(model_file)
             self.policy_value_net.set_state_dict(net_params)

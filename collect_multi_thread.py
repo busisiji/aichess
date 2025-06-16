@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-
+import glob
 import multiprocessing
 import time
 import logging
@@ -20,8 +20,9 @@ from game import Board, Game, move_id2move_action, move_action2move_id, flip_map
 from mcts import MCTSPlayer
 from config import CONFIG
 
-# 使用统一数据服务
-from data_service import DataManagementService
+# Redis 支持
+if CONFIG['use_redis']:
+    import redis
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -37,6 +38,12 @@ print_lock = multiprocessing.Lock()
 
 # 模型路径
 MODEL_PATH = CONFIG['pytorch_model_path']
+
+# 导入统一数据服务
+from data_service import DataManagementService
+
+# 初始化全局数据服务
+data_service = DataManagementService()
 
 
 # 自定义 CollectPipeline 类（进程安全）
@@ -54,10 +61,6 @@ class ProcessSafeCollectPipeline:
         self.temp_play_data = []  # 临时缓存未完成的对局数据
         self.nums = []  # 记录每局步数 * 2（包括镜像）
 
-        # 初始化统一数据服务
-        self.data_service = DataManagementService(CONFIG)
-        self.use_compression = self.data_service.use_compression
-
         # 加载传入的共享模型
         self.policy_value_net = model
         if CONFIG['use_frame'] == 'pytorch' and torch.cuda.is_available():
@@ -70,18 +73,18 @@ class ProcessSafeCollectPipeline:
             is_selfplay=1
         )
 
-        # 尝试恢复本地数据
-        self.data_buffer = self.data_service.load_initial_data() or []
+        # 加载初始数据
+        self.data_buffer = data_service.data_buffer  # 共享缓冲区
 
     def get_equi_data(self, play_data):
-        """数据增强：水平翻转"""
         extend_data = []
         for state, mcts_prob, winner in play_data:
+            # 原始数据
             extend_data.append((state, mcts_prob, winner))
 
-            # 翻转数据
-            state_flip = np.zeros_like(state)
+            # 水平翻转后的数据
             state = state.transpose([1, 2, 0])  # CHW -> HWC
+            state_flip = np.zeros_like(state)
             for i in range(10):
                 for j in range(9):
                     state_flip[i][j] = state[i][8 - j]
@@ -100,6 +103,14 @@ class ProcessSafeCollectPipeline:
 
     def run(self, logger=None):
         try:
+            filename = f"data/data_buffer_process_{self.process_id}.pkl"
+            if os.path.exists(filename):
+                try:
+                    logger.info(f"📂 正在加载历史数据: {filename}")
+                    _, self.nums, self.iters = data_service.load_initial_data(filename)
+                    logger.info(f"📥 成功加载 {self.iters} 局, {len(self.data_buffer)} 条数据")
+                except Exception as e:
+                    logger.error(f"❌ 加载历史数据失败: {e}")
             while True:
                 self.collect_selfplay_data(logger=logger)
                 time.sleep(1)  # 避免 CPU 占用过高
@@ -115,29 +126,38 @@ class ProcessSafeCollectPipeline:
             # 数据增强
             extended_data = self.get_equi_data(play_data)
 
-            # 使用服务接口写入数据
-            self.data_service.write_play_data(self.process_id, extended_data, self.iters + 1, [episode_len*2])
+            # 暂存临时数据
+            self.temp_play_data = extended_data
+            # 写入统一数据服务
+            self.save_data()
 
-            self.iters += 1
             logger.info(f"[进程 {self.process_id}] 第 {self.iters} 局结束，总步数: {episode_len}, 胜者: {winner}")
 
         except Exception as e:
-            logger.error(f"[进程 {self.process_id}] 对局中断或出错: {e}")
-            print(f"[进程 {self.process_id}] ⚠️ 对局中断，放弃当前未完成的数据")
+            logger.error(f"[进程 {self.process_id}] 对局中断或出错: {e}，放弃当前未完成的数据")
+            self.temp_play_data.clear()  # 清除临时数据
 
-    def save_to_disk(self):
-        """保留此方法作为备用，实际由 data_service 处理"""
-        pass
+    def save_data(self):
+        """写入对局数据"""
+        try:
+            self.data_buffer.extend(self.temp_play_data)
+            self.iters += 1
+            self.nums.append(len(self.temp_play_data) * 2)
+            data_service.write_play_data(
+                process_id=self.process_id,
+                play_data=self.data_buffer,
+                iters=self.iters,
+                nums=self.nums
+            )
+        except Exception as e:
+            logger.error(f"[进程 {self.process_id}] 数据写入失败: {e}")
+
 
 
 # 主进程合并
 def merge_and_cleanup_data_buffers(output_path, num_processes, buffer_size=100000):
-    """
-    使用统一数据服务进行数据合并与去重
-    """
-    data_service = DataManagementService(CONFIG)
-    merged_data = data_service.merge_all_data(output_path, num_processes)
-    return merged_data
+    """调用 DataManagementService 进行数据合并"""
+    data_service.merge_all_data(output_path=output_path, num_processes=num_processes)
 
 
 # 配置日志系统
@@ -212,5 +232,31 @@ if __name__ == "__main__":
     device = 'cuda' if torch.cuda.is_available() and CONFIG['use_frame'] == 'pytorch' else 'cpu'
     print(f"🎮 使用设备: {device.upper()}")
 
-    # 启动动态采集器
-    dynamic_process_manager(policy_value_net, NUM_PROCESSES)
+    # 先合并历史数据
+    OUTPUT_PATH = CONFIG['train_data_buffer_path']
+
+    # 使用 spawn 方式启动多进程（适用于 GPU）
+    ctx = multiprocessing.get_context('spawn')
+    Process = ctx.Process
+
+    processes = []
+    try:
+        print("🚀 启动多进程...")
+        for pid in range(NUM_PROCESSES):
+            p = Process(target=run_pipeline, args=(pid, policy_value_net))  # 只传两个参数
+            processes.append(p)
+            p.start()
+
+        for p in processes:
+            p.join()
+    except KeyboardInterrupt:
+        print("🛑 主进程收到中断信号，开始合并数据...")
+        data_files = glob.glob("data/data_buffer_process_*.pkl")
+        merge_and_cleanup_data_buffers(OUTPUT_PATH, len(data_files))
+        print("✅ len(data_files)个子数据合并完成")
+
+# if __name__ == '__main__':
+#     print("🛑 主进程收到中断信号，开始合并数据...")
+#     data_files = glob.glob("data/data_buffer_process_*.pkl")
+#     merge_and_cleanup_data_buffers(CONFIG['train_data_buffer_path'], len(data_files))
+#     print("✅ len(data_files)个子数据合并完成")

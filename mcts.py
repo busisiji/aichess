@@ -1,9 +1,11 @@
 """蒙特卡洛树搜索"""
 
-
 import numpy as np
 import copy
 from config import CONFIG
+
+# ✅ 新增 from game 导入 is_king_face_to_face 函数
+from game import is_king_face_to_face, move_id2move_action, change_state
 
 
 def softmax(x):
@@ -25,17 +27,17 @@ class TreeNode(object):
         :param prior_p:  当前节点被选择的先验概率
         """
         self._parent = parent
-        self._children = {} # 从动作到TreeNode的映射
-        self._n_visits = 0  # 当前当前节点的访问次数
-        self._Q = 0         # 当前节点对应动作的平均动作价值
-        self._u = 0         # 当前节点的置信上限         # PUCT算法
+        self._children = {}  # 从动作到TreeNode的映射
+        self._n_visits = 0   # 当前节点的访问次数
+        self._Q = 0          # 当前节点对应动作的平均动作价值
+        self._u = 0          # 当前节点的置信上限         # PUCT算法
         self._P = prior_p
 
     def expand(self, action_priors):    # 这里把不合法的动作概率全部设置为0
         """通过创建新子节点来展开树"""
         for action, prob in action_priors:
             if action not in self._children:
-                self._children[action] =  TreeNode(self, prob)
+                self._children[action] = TreeNode(self, prob)
 
     def select(self, c_puct):
         """
@@ -64,7 +66,6 @@ class TreeNode(object):
         # 更新Q值，取决于所有访问次数的平均树，使用增量式更新方式
         self._Q += 1.0 * (leaf_value - self._Q) / self._n_visits
 
-    # 使用递归的方法对所有节点（当前节点对应的支线）进行一次更新
     def update_recursive(self, leaf_value):
         """就像调用update()一样，但是对所有直系节点进行更新"""
         # 如果它不是根节点，则应首先更新此节点的父节点
@@ -103,20 +104,27 @@ class MCTS(object):
             action, node = node.select(self._c_puct)
             state.do_move(action)
 
+            # ✅ 新增：判断是否进入非法状态
+            if is_king_face_to_face(state.state_deque[-1]):
+                # 遇到非法走法，直接回退并结束 playout
+                state.state_deque.pop()
+                return
+
         # 使用网络评估叶子节点，网络输出（动作，概率）元组p的列表以及当前玩家视角的得分[-1, 1]
         action_probs, leaf_value = self._policy(state)
-        # 查看游戏是否结束
-        end, winner = state.game_end()
-        if not end:
-            node.expand(action_probs)
+
+        # ✅ 新增：如果当前状态非法，视为失败
+        if is_king_face_to_face(state.state_deque[-1]):
+            leaf_value = -1.0  # 视为失败
         else:
-            # 对于结束状态，将叶子节点的值换成1或-1
-            if winner == -1:    # Tie
-                leaf_value = 0.0
-            else:
-                leaf_value = (
-                    1.0 if winner == state.get_current_player_id() else -1.0
-                )
+            # 查看游戏是否结束
+            end, winner = state.game_end()
+            if end:
+                if winner == -1:    # Tie
+                    leaf_value = 0.0
+                else:
+                    leaf_value = 1.0 if winner == state.get_current_player_id() else -1.0
+
         # 在本次遍历中更新节点的值和访问次数
         # 必须添加符号，因为两个玩家共用一个搜索树
         node.update_recursive(-leaf_value)
@@ -127,16 +135,43 @@ class MCTS(object):
         state:当前游戏的状态
         temp:介于（0， 1]之间的温度参数
         """
+        # ✅ 新增：检查当前状态是否非法
+        if is_king_face_to_face(state.state_deque[-1]):
+            raise RuntimeError("当前棋盘状态违法：将帅面对面且中间无子")
+
+        legal_moves = state.availables
+        filtered_legal_moves = []
+
+        # ✅ 过滤掉会导致非法状态的走法
+        for move in legal_moves:
+            move_str = move_id2move_action[move]
+            next_state = change_state(state.state_deque[-1], move_str)
+            if not is_king_face_to_face(next_state):
+                filtered_legal_moves.append(move)
+
+        if not filtered_legal_moves:
+            print("没有合法走法，可能处于非法状态")
+            return [], []
+
+        # ✅ 只保留合法动作的概率预测
         for n in range(self._n_playout):
             state_copy = copy.deepcopy(state)
             self._playout(state_copy)
 
-        # 跟据根节点处的访问计数来计算移动概率
-        act_visits= [(act, node._n_visits)
-                     for act, node in self._root._children.items()]
+        # 根据根节点处的访问计数来计算移动概率
+        act_visits = [(act, node._n_visits)
+                      for act, node in self._root._children.items() if act in filtered_legal_moves]
+
+        if not act_visits:
+            # 没有访问任何合法节点，说明模拟路径都被过滤了
+            probs = np.zeros(len(filtered_legal_moves))
+            probs[:] = 1.0 / len(filtered_legal_moves)
+            return filtered_legal_moves, probs
+
         acts, visits = zip(*act_visits)
         act_probs = softmax(1.0 / temp * np.log(np.array(visits) + 1e-10))
-        return acts, act_probs
+
+        return list(acts), act_probs
 
     def update_with_move(self, last_move):
         """
@@ -175,13 +210,23 @@ class MCTSPlayer(object):
         # 像alphaGo_Zero论文一样使用MCTS算法返回的pi向量
         move_probs = np.zeros(2086)
 
-        acts, probs = self.mcts.get_move_probs(board, temp)
-        move_probs[list(acts)] = probs
+        try:
+            acts, probs = self.mcts.get_move_probs(board, temp=temp)
+        except RuntimeError as e:
+            print(f"错误：{e}")
+            return -1  # 返回无效动作
+
+        if not acts:
+            print("没有合法走法")
+            return -1
+
+        move_probs[acts] = probs
+
         if self._is_selfplay:
             # 添加Dirichlet Noise进行探索（自我对弈需要）
             move = np.random.choice(
                 acts,
-                p=0.75*probs + 0.25*np.random.dirichlet(CONFIG['dirichlet'] * np.ones(len(probs)))
+                p=0.75 * probs + 0.25 * np.random.dirichlet(CONFIG['dirichlet'] * np.ones(len(probs)))
             )
             # 更新根节点并重用搜索树
             self.mcts.update_with_move(move)
@@ -190,6 +235,7 @@ class MCTSPlayer(object):
             move = np.random.choice(acts, p=probs)
             # 重置根节点
             self.mcts.update_with_move(-1)
+
         if return_prob:
             return move, move_probs
         else:

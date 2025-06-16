@@ -45,13 +45,13 @@ class TrainPipeline:
         self.use_compression = CONFIG.get('use_data_compression', False)
 
         # 初始化数据服务
-        self.data_service = DataManagementService(CONFIG)
+        self.data_service = DataManagementService()
         self.data_buffer = self.data_service.data_buffer  # 共享缓冲区
 
         # 加载检查点（断点续训）
-        self.checkpoint = self.data_service.checkpoint
-        self.iters = self.checkpoint.get('iters', 0)
-        self.model_path = self.checkpoint.get('model_path', None)
+        self.data_service.checkpoint = self.data_service.load_checkpoint()
+        self.iters = self.data_service.checkpoint.get('iters', 0)
+        self.model_path = self.data_service.checkpoint.get('model_path', None)
         self.best_win_ratio = 0.0
         self.pure_mcts_playout_num = 500
 
@@ -101,7 +101,7 @@ class TrainPipeline:
                 time.sleep(10)  # 每隔10秒检查一次
         except KeyboardInterrupt:
             print("\n\r🛑 训练已手动终止，正在保存最终模型...")
-            final_model_path = CONFIG.get('final_model_path', 'models/final_policy.model')
+            final_model_path = CONFIG.get('pytorch_model_path', 'models/final_policy.model')
             self.policy_value_net.save_model(final_model_path)
             self.data_service.save_checkpoint(self.iters, final_model_path)
             print(f"✅ 最终模型已保存至: {final_model_path}")
@@ -195,9 +195,15 @@ class TrainPipeline:
                 print(f"💾 模型已保存至: {model_path}")
 
         # 最终保存
-        final_model_path = CONFIG.get('final_model_path', 'models/final_policy.model')
-        self.policy_value_net.save_model(final_model_path)
-        print(f"🏁 训练完成，最终模型保存至: {final_model_path}")
+        if CONFIG['use_frame'] == 'paddle':
+            self.policy_value_net.save_model(CONFIG['paddle_model_path'])
+            print(f"🏁 训练完成，最终模型保存至: {CONFIG['paddle_model_path']}")
+        elif CONFIG['use_frame'] == 'pytorch':
+            self.policy_value_net.save_model(CONFIG['pytorch_model_path'])
+            print(f"🏁 训练完成，最终模型保存至: {CONFIG['pytorch_model_path']}")
+        else:
+            print('不支持所选框架')
+
 
 
 if __name__ == '__main__':

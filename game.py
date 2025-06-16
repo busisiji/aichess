@@ -618,26 +618,65 @@ def get_legal_moves(state_deque, current_player_color):
                             if change_state(state_list, m) != old_state_list:
                                 moves.append(m)
 
-    if K_x is not None and k_x is not None and K_x == k_x:
-        face_to_face = True
-        for i in range(K_y + 1, k_y, 1):
-            if state_list[i][K_x] != '一一':
-                face_to_face = False
+    # 检查将帅是否对面且中间无子
+    if is_king_face_to_face(state_list):
+        raise Exception("将帅不能直接面对且中间无子")
 
-    if face_to_face is True:
-        if current_player_color == '黑':
-            m = str(k_y) + str(k_x) + str(K_y) + str(K_x)
-            if change_state(state_list, m) != old_state_list:
-                moves.append(m)
-        else:
-            m = str(K_y) + str(K_x) + str(k_y) + str(k_x)
-            if change_state(state_list, m) != old_state_list:
-                moves.append(m)
+    # 将帅不能导致进入非法对脸状态
+    for move in moves[:]:  # 使用副本避免修改迭代对象
+        next_state = change_state(state_list, move)
+        if is_king_face_to_face(next_state):
+            moves.remove(move)
+
 
     moves_id = []
     for move in moves:
         moves_id.append(move_action2move_id[move])
     return moves_id
+
+def is_king_face_to_face(state_list):
+    """
+    检查当前棋盘是否违反将帅不能直接照面的规则。
+
+    :param state_list: 当前棋盘状态（二维列表）
+    :return: True 表示违反规则，False 表示合法
+    """
+    k_pos = None
+    K_pos = None
+
+    # 找出黑帅和红帅的位置
+    for y in range(10):
+        for x in range(9):
+            if state_list[y][x] == '黑帅':
+                k_pos = (y, x)
+            elif state_list[y][x] == '红帅':
+                K_pos = (y, x)
+
+    if not k_pos or not K_pos:
+        return False  # 如果没有两个帅，则不违反规则
+
+    k_y, k_x = k_pos
+    K_y, K_x = K_pos
+
+    # 只有在同一列时才需要检查
+    if k_x != K_x:
+        return False
+
+    min_y, max_y = sorted([k_y, K_y])
+
+    # 如果相邻，也视为违规
+    if max_y - min_y <= 1:
+        return True
+
+    # 检查中间是否有其他棋子
+    for y in range(min_y + 1, max_y):
+        if state_list[y][k_x] == '一一':
+            continue
+        else:
+            return False  # 中间有棋子，合法
+
+    # 中间全是空位，说明将帅面对面且无遮挡，违规
+    return True
 
 
 # 棋盘逻辑控制
