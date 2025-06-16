@@ -204,8 +204,7 @@ def is_in_check(state_list: List[List[str]], player_color: str) -> bool:
 
 def is_stalemate(state_deque: deque, current_player_color: str) -> bool:
     moves = get_legal_moves(state_deque, current_player_color)
-    return len(moves) == 0 or is_suffocated(state_deque[-1], current_player_color)
-
+    return len(moves) == 0
 
 def is_suffocated(state_list: List[List[str]], player_color: str) -> bool:
     king_pos = None
@@ -414,13 +413,24 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                     break
 
     elif piece == f'{player_color}马':
-        knight_moves = [(-2, -1), (-1, -2), (-2, 1), (1, -2),
-                        (2, -1), (-1, 2), (2, 1), (1, 2)]
+        knight_moves = [
+            (-2, -1), (-1, -2), (-2, 1), (1, -2),
+            (2, -1), (-1, 2), (2, 1), (1, 2)
+        ]
         for dy, dx in knight_moves:
             ny, nx = y + dy, x + dx
             if not check_bounds(ny, nx):
                 continue
-            leg_y, leg_x = y + dy // 2, x + dx // 2
+            # 检查马腿
+            if dy == -2 and dx == -1: leg_y, leg_x = y - 1, x
+            elif dy == -2 and dx == 1: leg_y, leg_x = y - 1, x
+            elif dy == -1 and dx == -2: leg_y, leg_x = y, x - 1
+            elif dy == 1 and dx == -2: leg_y, leg_x = y, x - 1
+            elif dy == 2 and dx == -1: leg_y, leg_x = y + 1, x
+            elif dy == 2 and dx == 1: leg_y, leg_x = y + 1, x
+            elif dy == -1 and dx == 2: leg_y, leg_x = y, x + 1
+            elif dy == 1 and dx == 2: leg_y, leg_x = y, x + 1
+
             if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[ny][nx], player_color):
                 legal_moves.append(f"{y}{x}{ny}{nx}")
 
@@ -445,6 +455,7 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                         if (player_color == '红' and '黑' in target) or (player_color == '黑' and '红' in target):
                             legal_moves.append(f"{y}{x}{ny}{nx}")
                         break
+
 
     elif piece == f'{player_color}兵':
         forward = -1 if player_color == '黑' else 1
@@ -472,6 +483,17 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
         for dy, dx in elephant_moves:
             ny, nx = y + dy, x + dx
             if not check_bounds(ny, nx):
+                continue
+            # 修改象眼判断
+            if player_color == '红':
+                if ny > 4:
+                    continue
+            else:
+                if ny < 5:
+                    continue
+            # 添加象眼堵塞检查
+            elephant_eye = state_list[y + (dy // 2)][x + (dx // 2)]
+            if elephant_eye != '一一':
                 continue
             leg_y, leg_x = y + dy // 2, x + dx // 2
             if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[ny][nx], player_color):
