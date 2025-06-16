@@ -25,6 +25,25 @@ else:
     raise NotImplementedError("暂不支持所选框架")
 
 
+def apply_rules_pruning(policy, board):
+    """
+    根据当前棋盘状态，将不合法动作的概率设置为0，并重新归一化
+    """
+    legal_moves = board.availables
+    legal_mask = np.zeros_like(policy)
+    legal_mask[legal_moves] = 1
+
+    # 应用掩码并重新归一化
+    policy *= legal_mask
+    if policy.sum() > 0:
+        policy /= policy.sum()
+    else:
+        # 如果所有动作都被屏蔽，回退到均匀分布
+        policy = np.ones_like(policy) / len(policy)
+
+    return policy
+
+
 class TrainPipeline:
 
     def __init__(self, init_model=None):
@@ -167,6 +186,21 @@ class TrainPipeline:
         elif kl < self.kl_targ / 2 and self.lr_multiplier < 10:
             self.lr_multiplier *= 1.5
 
+        # 在训练前应用规则剪枝
+        pruned_mcts_probs_batch = []
+        for i, data in enumerate(mini_batch):
+            board = data[0]  # 获取board对象
+            pruned_prob = apply_rules_pruning(mcts_probs_batch[i].copy(), board)
+            pruned_mcts_probs_batch.append(pruned_prob)
+
+        # 使用剪枝后的概率进行训练
+        loss, entropy = self.policy_value_net.train_step(
+            state_batch,
+            np.array(pruned_mcts_probs_batch),
+            winner_batch,
+            self.learn_rate * self.lr_multiplier
+        )
+
         print(f"📊 KL: {kl:.5f}, LR Multiplier: {self.lr_multiplier:.3f}, Loss: {loss:.4f}, Entropy: {entropy:.4f}")
         return loss, entropy
 
@@ -203,7 +237,6 @@ class TrainPipeline:
             print(f"🏁 训练完成，最终模型保存至: {CONFIG['pytorch_model_path']}")
         else:
             print('不支持所选框架')
-
 
 
 if __name__ == '__main__':
