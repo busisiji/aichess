@@ -5,7 +5,7 @@ import copy
 from config import CONFIG
 
 # ✅ 新增 from game 导入 is_king_face_to_face 函数
-from game import is_king_face_to_face, move_id2move_action, change_state
+from game import is_king_face_to_face, move_id2move_action, change_state, is_in_check
 
 
 def softmax(x):
@@ -219,18 +219,25 @@ class MCTSPlayer(object):
 
         move_probs[acts] = probs
 
+        # 增加对将军动作的概率奖励
+        new_probs = np.copy(probs)
+        for idx, move in enumerate(acts):
+            move_str = move_id2move_action[move]
+            next_state = change_state(board.state_deque[-1], move_str)
+            if is_in_check(next_state, board.get_current_player_color()):
+                new_probs[idx] *= CONFIG.get('check_reward_factor', 1.5)  # 提高概率
+
+        # 归一化
+        new_probs /= np.sum(new_probs)
+
         if self._is_selfplay:
-            # 添加Dirichlet Noise进行探索（自我对弈需要）
             move = np.random.choice(
                 acts,
-                p=0.75 * probs + 0.25 * np.random.dirichlet(CONFIG['dirichlet'] * np.ones(len(probs)))
+                p=0.75 * new_probs + 0.25 * np.random.dirichlet(CONFIG['dirichlet'] * np.ones(len(new_probs)))
             )
-            # 更新根节点并重用搜索树
             self.mcts.update_with_move(move)
         else:
-            # 使用默认的temp=1e-3，它几乎相当于选择具有最高概率的移动
-            move = np.random.choice(acts, p=probs)
-            # 重置根节点
+            move = np.random.choice(acts, p=new_probs)
             self.mcts.update_with_move(-1)
 
         if return_prob:

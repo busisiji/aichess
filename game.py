@@ -209,8 +209,28 @@ def is_in_check(state_list: List[List[str]], player_color: str) -> bool:
 
 def is_stalemate(state_deque: deque, current_player_color: str) -> bool:
     moves = get_legal_moves(state_deque, current_player_color)
-    return len(moves) == 0 and not is_in_check(state_deque[-1], current_player_color)
+    return len(moves) == 0 or is_suffocated(state_deque[-1], current_player_color)
 
+def is_suffocated(state_list: List[List[str]], player_color: str) -> bool:
+    """
+    判断是否处于"闷宫"状态：将帅被困无法移动但未被将军
+    """
+    king_pos = None
+    for y in range(10):
+        for x in range(9):
+            if player_color == '红' and state_list[y][x] == '红帅':
+                king_pos = (y, x)
+            elif player_color == '黑' and state_list[y][x] == '黑帅':
+                king_pos = (y, x)
+
+    if not king_pos:
+        return False
+
+    # 获取将帅当前位置的所有合法移动
+    legal_moves = get_piece_legal_moves(state_list, *king_pos, player_color)
+
+    # 如果没有合法移动，且未被将军，则为闷宫
+    return len(legal_moves) == 0 and not is_in_check(state_list, player_color)
 
 def check_repetition_rules(state_deque: deque) -> str:
     from collections import Counter
@@ -227,6 +247,47 @@ def check_repetition_rules(state_deque: deque) -> str:
             return "long_check"
     elif len(count) == 2:
         return "repetition_draw"
+    return "normal"
+def check_complex_repetition(state_deque: deque) -> str:
+    """
+    检查复杂循环局面：
+    - 一将一闲
+    - 一将一捉
+    - 长捉
+    """
+    states = list(state_deque)
+    moves = [move_id2move_action[m] for m in state_deque.board.move_history[-len(states)+1:]]
+
+    if len(states) < 4:
+        return "normal"
+
+    last_state = states[-1]
+    prev_states = states[:-1]
+
+    # 简单重复
+    if all(str(s) == str(last_state) for s in prev_states):
+        return "repetition_draw"
+
+    # 复杂循环：比如一将一捉
+    action_types = []
+    for i in range(len(moves)):
+        move_str = moves[i]
+        sy, sx, ey, ex = map(int, move_str)
+        piece = state_deque[i][sy][sx]
+        target = state_deque[i][ey][ex]
+        if target != '一一':
+            action_types.append("capture")
+        elif is_in_check(state_deque[i+1], '红' if i % 2 == 0 else '黑'):
+            action_types.append("check")
+        else:
+            action_types.append("idle")
+
+    # 示例：检查最近四步动作类型是否是 check-idle-check-idle
+    if len(action_types) >= 4:
+        pattern = ''.join([{'check': 'C', 'idle': 'I', 'capture': 'X'}[t] for t in action_types[-4:]])
+        if pattern in ['CICD', 'CDCI', 'CCCC', 'XXXX']:
+            return "complex_repetition"
+
     return "normal"
 
 
@@ -332,7 +393,7 @@ class Board:
 
     def game_end(self) -> Tuple[bool, int]:
         win, winner = self.has_a_winner()
-        if check_repetition_rules(self.state_deque) in ["long_check", "long_capture"]:
+        if check_complex_repetition(self.state_deque) in ["long_check", "long_capture", "complex_repetition"]:
             return True, self.backhand_player
         if win:
             return True, winner
