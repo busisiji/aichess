@@ -137,14 +137,15 @@ class MCTS(object):
         """
 
         legal_moves = state.availables
-        filtered_legal_moves = []
 
         # ✅ 过滤掉会导致非法状态的走法
+        filtered_legal_moves = []
         for move in legal_moves:
             move_str = move_id2move_action[move]
             next_state = change_state(state.state_deque[-1], move_str)
-            if not is_king_face_to_face(next_state):
+            if not is_king_face_to_face(next_state) and not is_in_check(next_state, state.get_current_player_color()):
                 filtered_legal_moves.append(move)
+
 
         if not filtered_legal_moves:
             print("没有合法走法，可能处于非法状态")
@@ -217,27 +218,26 @@ class MCTSPlayer(object):
             print("没有合法走法")
             return -1
 
-        move_probs[acts] = probs
-
-        # 增加对将军动作的概率奖励
-        new_probs = np.copy(probs)
-        for idx, move in enumerate(acts):
-            move_str = move_id2move_action[move]
-            next_state = change_state(board.state_deque[-1], move_str)
-            if is_in_check(next_state, board.get_current_player_color()):
-                new_probs[idx] *= CONFIG.get('check_reward_factor', 1.5)  # 提高概率
+        move_probs[list(acts)] = probs
+        # # 增加对将军动作的概率奖励
+        # new_probs = np.copy(probs)
+        # for idx, move in enumerate(acts):
+        #     move_str = move_id2move_action[move]
+        #     next_state = change_state(board.state_deque[-1], move_str)
+        #     if is_in_check(next_state, board.get_current_player_color()):
+        #         new_probs[idx] *= CONFIG.get('check_reward_factor', 1.5)  # 提高概率
 
         # 归一化
-        new_probs /= np.sum(new_probs)
+        # new_probs /= np.sum(new_probs)
 
         if self._is_selfplay:
             move = np.random.choice(
                 acts,
-                p=0.75 * new_probs + 0.25 * np.random.dirichlet(CONFIG['dirichlet'] * np.ones(len(new_probs)))
+                p=0.75 * probs + 0.25 * np.random.dirichlet(CONFIG['dirichlet'] * np.ones(len(probs)))
             )
             self.mcts.update_with_move(move)
         else:
-            move = np.random.choice(acts, p=new_probs)
+            move = np.random.choice(acts, p=probs)
             self.mcts.update_with_move(-1)
 
         if return_prob:

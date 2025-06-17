@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-棋盘游戏控制 - 完整封装版本
+棋盘游戏控制 - 完整封装版本（增强象棋规则）
 """
 
 import time
@@ -57,13 +57,20 @@ def array2string(array) -> str:
 
 
 def change_state(state_list, move: str) -> List[List[str]]:
-    copy_list = copy.deepcopy(state_list)
+    """
+    执行一次移动操作并返回新棋盘状态
+    """
     y, x, toy, tox = map(int, move)
-    copy_list[toy][tox] = copy_list[y][x]
-    copy_list[y][x] = '一一'
-    if is_king_face_to_face(copy_list):
+    new_state = copy.deepcopy(state_list)
+    new_state[toy][tox] = new_state[y][x]
+    new_state[y][x] = '一一'
+
+    if is_king_face_to_face(new_state):
         raise IllegalMoveError("非法状态：将帅面对面且中间无子！")
-    return copy_list
+    if is_both_check(new_state):
+        raise IllegalMoveError("非法状态：解将还将！")
+
+    return new_state
 
 
 def print_board(_state_array):
@@ -84,8 +91,15 @@ def state_list2state_array(state_list):
 
 
 def get_all_legal_moves():
-    _move_id2move_action = {}
-    _move_action2move_id = {}
+    """
+    生成所有合法走法
+    返回：
+        move_id2move_action: {int: str}
+        move_action2move_id: {str: int}
+    """
+    move_id2move_action = {}
+    move_action2move_id = {}
+
     row = [str(i) for i in range(9)]
     column = [str(i) for i in range(10)]
 
@@ -103,25 +117,23 @@ def get_all_legal_moves():
             destinations = [(t, n1) for t in range(10)] + \
                            [(l1, t) for t in range(9)] + \
                            [(l1 + a, n1 + b) for (a, b) in
-                            [(-2, -1), (-1, -2), (-2, 1), (1, -2), (2, -1), (-1, 2), (2, 1), (1, 2)]]
+                            [(-2, -1), (-1, -2), (-2, 1), (1, -2),
+                             (2, -1), (-1, 2), (2, 1), (1, 2)]]
             for (l2, n2) in destinations:
                 if (l1, n1) != (l2, n2) and 0 <= l2 < 10 and 0 <= n2 < 9:
                     action = column[l1] + row[n1] + column[l2] + row[n2]
-                    _move_id2move_action[idx] = action
-                    _move_action2move_id[action] = idx
-                    idx += 1
+                    if action not in move_action2move_id:
+                        move_id2move_action[idx] = action
+                        move_action2move_id[action] = idx
+                        idx += 1
 
-    for action in advisor_labels:
-        _move_id2move_action[idx] = action
-        _move_action2move_id[action] = idx
-        idx += 1
+    for action in advisor_labels + bishop_labels:
+        if action not in move_action2move_id:
+            move_id2move_action[idx] = action
+            move_action2move_id[action] = idx
+            idx += 1
 
-    for action in bishop_labels:
-        _move_id2move_action[idx] = action
-        _move_action2move_id[action] = idx
-        idx += 1
-
-    return _move_id2move_action, _move_action2move_id
+    return move_id2move_action, move_action2move_id
 
 
 move_id2move_action, move_action2move_id = get_all_legal_moves()
@@ -159,19 +171,15 @@ def is_king_face_to_face(state_list: List[List[str]]) -> bool:
 
     if not k_pos or not K_pos:
         return False
-
-    k_y, k_x = k_pos
-    K_y, K_x = K_pos
-
-    if k_x != K_x:
+    if k_pos[1] != K_pos[1]:
         return False
 
-    min_y, max_y = sorted([k_y, K_y])
+    min_y, max_y = sorted([k_pos[0], K_pos[0]])
     if max_y - min_y <= 1:
         return True
 
     for y in range(min_y + 1, max_y):
-        if state_list[y][k_x] != '一一':
+        if state_list[y][k_pos[1]] != '一一':
             return False
     return True
 
@@ -189,8 +197,8 @@ def is_in_check(state_list: List[List[str]], player_color: str) -> bool:
         return False
 
     opponent_color = '黑' if player_color == '红' else '红'
-
     check_count = 0
+
     for y in range(10):
         for x in range(9):
             piece = state_list[y][x]
@@ -202,64 +210,22 @@ def is_in_check(state_list: List[List[str]], player_color: str) -> bool:
     return check_count > 0
 
 
-def is_stalemate(state_deque: deque, current_player_color: str) -> bool:
-    moves = get_legal_moves(state_deque, current_player_color)
-    return len(moves) == 0
+def is_both_check(state_list: List[List[str]]) -> bool:
+    return is_in_check(state_list, '红') and is_in_check(state_list, '黑')
+
 
 def is_suffocated(state_list: List[List[str]], player_color: str) -> bool:
-    king_pos = None
-    for y in range(10):
-        for x in range(9):
-            if player_color == '红' and state_list[y][x] == '红帅':
-                king_pos = (y, x)
-            elif player_color == '黑' and state_list[y][x] == '黑帅':
-                king_pos = (y, x)
-
-    if not king_pos:
+    if is_in_check(state_list, player_color):
         return False
 
-    legal_moves = get_piece_legal_moves(state_list, *king_pos, player_color)
-    return len(legal_moves) == 0 and not is_in_check(state_list, player_color)
-
-
-def check_complex_repetition(state_deque: deque) -> str:
-    states = list(state_deque)
-    moves = [move_id2move_action[m] for m in state_deque.board.move_history[-len(states)+1:]]
-
-    if len(states) < 4:
-        return "normal"
-
-    if all(str(s) == str(states[-1]) for s in states[:-1]):
-        return "repetition_draw"
-
-    action_types = []
-    for i in range(len(moves)):
-        move_str = moves[i]
-        sy, sx = int(move_str[0]), int(move_str[1])
-        ey, ex = int(move_str[2]), int(move_str[3])
-        piece = state_deque[i][sy][sx]
-        target = state_deque[i][ey][ex]
-
-        if target != '一一':
-            action_types.append("capture")
-        elif is_in_check(state_deque[i+1], '红' if i % 2 == 0 else '黑'):
-            action_types.append("check")
-        else:
-            action_types.append("idle")
-
-    if len(action_types) >= 6:
-        pattern = ''.join([{'check': 'C', 'idle': 'I', 'capture': 'X'}[t] for t in action_types[-6:]])
-
-        if pattern == 'CCCCCC':
-            return "long_check"
-        elif pattern == 'XXXXXX':
-            return "long_capture"
-        elif pattern in ['CICI', 'XCXC', 'IXIX']:
-            return "complex_repetition"
-        elif pattern in ['CXRX', 'XCXR']:
-            return "complex_repetition"
-
-    return "normal"
+    for y in range(10):
+        for x in range(9):
+            piece = state_list[y][x]
+            if piece.startswith(player_color):
+                legal_moves = get_piece_legal_moves(state_list, y, x, player_color)
+                if legal_moves:
+                    return False
+    return True
 
 
 class IllegalMoveError(Exception):
@@ -267,7 +233,7 @@ class IllegalMoveError(Exception):
 
 
 class Board:
-    def __init__(self):
+    def __init__(self, enable_complex_repetition=True):
         self.state_list = copy.deepcopy(state_list_init)
         self.game_start = False
         self.winner = None
@@ -282,6 +248,7 @@ class Board:
         self.current_player_id = 1
         self.last_move = -1
         self.move_history = []
+        self.enable_complex_repetition = enable_complex_repetition  # 控制是否启用复杂规则
 
     def init_board(self, start_player: int = 1):
         self.start_player = start_player
@@ -293,6 +260,7 @@ class Board:
             self.id2color = {2: '红', 1: '黑'}
             self.color2id = {'红': 2, '黑': 1}
             self.backhand_player = 1
+
         self.current_player_color = self.id2color[start_player]
         self.current_player_id = self.color2id['红']
         self.state_list = copy.deepcopy(state_list_init)
@@ -310,14 +278,17 @@ class Board:
     def current_state(self) -> np.ndarray:
         _current_state = np.zeros([9, 10, 9])
         _current_state[:7] = state_list2state_array(self.state_deque[-1]).transpose([2, 0, 1])
+
         if self.game_start:
             move = move_id2move_action[self.last_move]
             sy, sx = int(move[0]), int(move[1])
             ey, ex = int(move[2]), int(move[3])
             _current_state[7][sy][sx] = -1
             _current_state[7][ey][ex] = 1
+
         if self.action_count % 2 == 0:
             _current_state[8][:, :] = 1.0
+
         return _current_state.copy()
 
     def do_move(self, move: int) -> bool:
@@ -330,6 +301,11 @@ class Board:
 
             state_list = copy.deepcopy(self.state_deque[-1])
 
+            # 检查是否处于被将军状态，必须应将
+            if is_in_check(state_list, self.current_player_color):
+                return False  # 必须应将，不能置之不理，视为非法动作
+
+            # 处理吃子逻辑
             if state_list[end_y][end_x] != '一一':
                 self.kill_action = 0
                 if self.current_player_color == '黑' and state_list[end_y][end_x] == '红帅':
@@ -339,43 +315,56 @@ class Board:
             else:
                 self.kill_action += 1
 
+            # 执行移动
             next_state = change_state(state_list, move_action)
 
+            # 检查移动后是否仍被将军（无效应将）
             if is_in_check(next_state, self.current_player_color):
-                raise IllegalMoveError("不能让自己处于被将军状态！")
+                return False  # 移动后仍被将军，视为非法动作
 
+            # 检查将帅是否面对面
             if is_king_face_to_face(next_state):
-                raise IllegalMoveError("将帅不能面对面且中间无子！")
+                return False  # 将帅对面，非法动作
 
+            # 检查解将还将
+            if is_both_check(next_state):
+                return False  # 解将还将，非法动作
+
+            # 实际更新棋盘状态
             state_list[end_y][end_x] = state_list[start_y][start_x]
             state_list[start_y][start_x] = '一一'
             self.current_player_color = '黑' if self.current_player_color == '红' else '红'
             self.current_player_id = 1 if self.current_player_id == 2 else 2
             self.last_move = move
             self.state_deque.append(state_list)
-            self.move_history.append(move_action)
+            self.move_history.append(move)
             return True
+
         except Exception as e:
-            print(f"[错误] 动作 {move} 导致异常: {e}")
-            return False
+            print(f"[警告] 动作 {move} 非法: {e}")
+            return False  # 返回 False 表示非法动作
 
     def has_a_winner(self) -> Tuple[bool, int]:
         if self.winner is not None:
             return True, self.winner
-        elif self.kill_action >= CONFIG['kill_action']:
+        if self.kill_action >= CONFIG['kill_action']:
             return True, self.backhand_player
         return False, -1
 
     def game_end(self) -> Tuple[bool, int]:
         win, winner = self.has_a_winner()
-        if check_complex_repetition(self.state_deque) in ["long_check", "long_capture", "complex_repetition"]:
+        repetition_result = "normal"
+        if self.enable_complex_repetition:
+            repetition_result = check_complex_repetition(self.state_deque, self.move_history)
+
+        if repetition_result in ["long_check", "long_capture", "long_chase"]:
             return True, self.backhand_player
         if win:
             return True, winner
-        elif self.kill_action >= CONFIG['kill_action']:
+        if self.kill_action >= CONFIG['kill_action']:
             return True, -1
-        elif is_stalemate(self.state_deque, self.current_player_color):
-            return True, -1
+        if is_suffocated(self.state_deque[-1], self.current_player_color):
+            return True, self.backhand_player
         return False, -1
 
     def get_current_player_color(self) -> str:
@@ -395,8 +384,9 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
 
     legal_moves = []
 
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+
     if piece == f'{player_color}车':
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         for dy, dx in directions:
             ny, nx = y, x
             while True:
@@ -408,34 +398,24 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                 if target == '一一':
                     legal_moves.append(f"{y}{x}{ny}{nx}")
                 else:
-                    if (player_color == '红' and '黑' in target) or (player_color == '黑' and '红' in target):
+                    if check_obstruct(target, player_color):
                         legal_moves.append(f"{y}{x}{ny}{nx}")
                     break
 
     elif piece == f'{player_color}马':
-        knight_moves = [
-            (-2, -1), (-1, -2), (-2, 1), (1, -2),
-            (2, -1), (-1, 2), (2, 1), (1, 2)
-        ]
+        knight_moves = [(-2, -1), (-1, -2), (-2, 1), (1, -2),
+                        (2, -1), (-1, 2), (2, 1), (1, 2)]
         for dy, dx in knight_moves:
             ny, nx = y + dy, x + dx
             if not check_bounds(ny, nx):
                 continue
-            # 检查马腿
-            if dy == -2 and dx == -1: leg_y, leg_x = y - 1, x
-            elif dy == -2 and dx == 1: leg_y, leg_x = y - 1, x
-            elif dy == -1 and dx == -2: leg_y, leg_x = y, x - 1
-            elif dy == 1 and dx == -2: leg_y, leg_x = y, x - 1
-            elif dy == 2 and dx == -1: leg_y, leg_x = y + 1, x
-            elif dy == 2 and dx == 1: leg_y, leg_x = y + 1, x
-            elif dy == -1 and dx == 2: leg_y, leg_x = y, x + 1
-            elif dy == 1 and dx == 2: leg_y, leg_x = y, x + 1
-
-            if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[ny][nx], player_color):
+            leg_y, leg_x = y + dy // 2, x + dx // 2
+            if state_list[leg_y][leg_x] != '一一':
+                continue
+            if check_obstruct(state_list[ny][nx], player_color):
                 legal_moves.append(f"{y}{x}{ny}{nx}")
 
     elif piece == f'{player_color}炮':
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
         for dy, dx in directions:
             ny, nx = y, x
             hits = False
@@ -451,18 +431,15 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
                     else:
                         hits = True
                 else:
-                    if target != '一一':
-                        if (player_color == '红' and '黑' in target) or (player_color == '黑' and '红' in target):
-                            legal_moves.append(f"{y}{x}{ny}{nx}")
-                        break
-
+                    if target != '一一' and check_obstruct(target, player_color):
+                        legal_moves.append(f"{y}{x}{ny}{nx}")
+                    break
 
     elif piece == f'{player_color}兵':
         forward = -1 if player_color == '黑' else 1
         moves = [(forward, 0)]
         if (player_color == '红' and y <= 4) or (player_color == '黑' and y >= 5):
             moves.extend([(0, 1), (0, -1)])
-
         for dy, dx in moves:
             ny, nx = y + dy, x + dx
             if check_bounds(ny, nx) and check_obstruct(state_list[ny][nx], player_color):
@@ -484,30 +461,19 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
             ny, nx = y + dy, x + dx
             if not check_bounds(ny, nx):
                 continue
-            # 修改象眼判断
-            if player_color == '红':
-                if ny > 4:
-                    continue
-            else:
-                if ny < 5:
-                    continue
-            # 添加象眼堵塞检查
-            elephant_eye = state_list[y + (dy // 2)][x + (dx // 2)]
-            if elephant_eye != '一一':
+            eye_y, eye_x = y + dy // 2, x + dx // 2
+            if state_list[eye_y][eye_x] != '一一':
                 continue
-            leg_y, leg_x = y + dy // 2, x + dx // 2
-            if state_list[leg_y][leg_x] == '一一' and check_obstruct(state_list[ny][nx], player_color):
+            if check_obstruct(state_list[ny][nx], player_color):
                 if (player_color == '红' and ny <= 4) or (player_color == '黑' and ny >= 5):
                     legal_moves.append(f"{y}{x}{ny}{nx}")
 
     elif piece == f'{player_color}帅':
         for dy, dx in [(-1, 0), (1, 0), (0, 1), (0, -1)]:
             ny, nx = y + dy, x + dx
-            if player_color == '红' and 0 <= ny <= 2 and 3 <= nx <= 5:
-                if check_obstruct(state_list[ny][nx], player_color):
-                    legal_moves.append(f"{y}{x}{ny}{nx}")
-            elif player_color == '黑' and 7 <= ny <= 9 and 3 <= nx <= 5:
-                if check_obstruct(state_list[ny][nx], player_color):
+            if check_bounds(ny, nx) and check_obstruct(state_list[ny][nx], player_color):
+                if ((player_color == '红' and 0 <= ny <= 2 and 3 <= nx <= 5) or
+                    (player_color == '黑' and 7 <= ny <= 9 and 3 <= nx <= 5)):
                     legal_moves.append(f"{y}{x}{ny}{nx}")
 
     return legal_moves
@@ -515,29 +481,73 @@ def get_piece_legal_moves(state_list: List[List[str]], y: int, x: int, player_co
 
 def get_legal_moves(state_deque: deque, current_player_color: str) -> List[int]:
     state_list = state_deque[-1]
-    old_state_list = state_deque[-4]
-    moves = []
+    old_state_list = state_deque[-4] if len(state_deque) >= 4 else state_list
 
+    moves = []
     for y in range(10):
         for x in range(9):
             piece = state_list[y][x]
-            if piece == '一一':
-                continue
             if not piece.startswith(current_player_color):
                 continue
 
             legal_moves = get_piece_legal_moves(state_list, y, x, current_player_color)
             for m in legal_moves:
-                if change_state(state_list, m) != old_state_list:
-                    moves.append(m)
+                try:
+                    next_state = change_state(state_list, m)
+                    if not is_in_check(next_state, current_player_color) and next_state != old_state_list:
+                        moves.append(m)
+                except IllegalMoveError:
+                    continue
 
-    for move in moves[:]:
-        next_state = change_state(state_list, move)
-        if is_king_face_to_face(next_state):
-            moves.remove(move)
+    return [move_action2move_id[m] for m in moves if m in move_action2move_id]
 
-    moves_id = [move_action2move_id[m] for m in moves]
-    return moves_id
+
+def check_complex_repetition(state_deque: deque, move_history: List[int]) -> str:
+    states = list(state_deque)
+    if len(states) < 4:
+        return "normal"
+
+    if all(str(s) == str(states[-1]) for s in states[:-1]):
+        return "repetition_draw"
+
+    if not move_history:
+        return "normal"
+
+    moves = []
+    for m in move_history[-(len(states) - 1):]:
+        move_action = move_id2move_action.get(m, None)
+        if move_action is None:
+            return "normal"
+        moves.append(move_action)
+
+    action_types = []
+    for i in range(len(moves)):
+        move_str = moves[i]
+        sy, sx = int(move_str[0]), int(move_str[1])
+        ey, ex = int(move_str[2]), int(move_str[3])
+        piece = states[i][sy][sx]
+        target = states[i][ey][ex]
+
+        if target != '一一':
+            action_types.append("capture")
+        elif is_in_check(states[i + 1], '红' if i % 2 == 0 else '黑'):
+            action_types.append("check")
+        else:
+            action_types.append("idle")
+
+    if len(action_types) >= 6:
+        pattern = ''.join([{'check': 'C', 'idle': 'I', 'capture': 'X'}[t] for t in action_types[-6:]])
+
+        if pattern == 'CCCCCC':
+            return "long_check"
+        elif pattern == 'XXXXXX':
+            return "long_capture"
+        elif pattern.startswith('CX') and all(pattern[i] == 'C' for i in range(0, 6, 2)) and all(pattern[i] == 'X' for i in range(1, 6, 2)):
+            return "long_chase"
+        elif pattern.startswith('XC') and all(pattern[i] == 'X' for i in range(0, 6, 2)) and all(pattern[i] == 'C' for i in range(1, 6, 2)):
+            return "long_chase"
+
+    return "normal"
 
 
 class Game:
@@ -550,8 +560,6 @@ class Game:
         print_board(state_list2state_array(board.state_deque[-1]))
 
     def start_play(self, player1, player2, start_player=1, is_shown=1):
-        if start_player not in (1, 2):
-            raise Exception('start_player should be either 1 or 2')
         self.board.init_board(start_player)
         p1, p2 = 1, 2
         player1.set_player_ind(p1)
@@ -582,19 +590,22 @@ class Game:
         states, mcts_probs, current_players = [], [], []
         _count = 0
         while True:
+            start_time = time.time()
             if _count % 20 == 0:
-                start_time = time.time()
                 move, move_probs = player.get_action(self.board, temp=temp, return_prob=1)
-                result_msg = f'第{_count + 1}步，走一步要花: {time.time() - start_time}'
-                if logger:
-                    logger.info(result_msg)
             else:
                 move, move_probs = player.get_action(self.board, temp=temp, return_prob=1)
+            success = self.board.do_move(move)
+            if not success:
+                continue  # 如果动作非法，继续循环获取新动作
+            result_msg = f'第{_count + 1}步，走一步要花: {time.time() - start_time}'
+            if logger:
+                logger.info(result_msg)
+
             _count += 1
             states.append(self.board.current_state())
             mcts_probs.append(move_probs)
             current_players.append(self.board.current_player_id)
-            self.board.do_move(move)
             end, winner = self.board.game_end()
             if end:
                 winner_z = np.zeros(len(current_players))
