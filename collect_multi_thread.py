@@ -83,14 +83,11 @@ class ProcessSafeCollectPipeline:
             extend_data.append((state, mcts_prob, winner))
 
             # 水平翻转后的数据
-            state = state.transpose([1, 2, 0])  # CHW -> HWC
-            state_flip = np.zeros_like(state)
-            for i in range(10):
-                for j in range(9):
-                    state_flip[i][j] = state[i][8 - j]
-            state_flip = state_flip.transpose([2, 0, 1])  # HWC -> CHW
+            state_flip = state.transpose([1, 2, 0])
+            state_flip = np.array([[state_flip[i][8-j] for j in range(9)] for i in range(10)])
+            state_flip = state_flip.transpose([2, 0, 1])
 
-            mcts_prob_flip = [0] * len(mcts_prob)
+            mcts_prob_flip = [0]*len(mcts_prob)
             for i in range(len(mcts_prob_flip)):
                 action = move_id2move_action[i]
                 flipped_action = flip_map(action)
@@ -98,8 +95,9 @@ class ProcessSafeCollectPipeline:
                 if flipped_id is not None:
                     mcts_prob_flip[i] = mcts_prob[flipped_id]
 
-            extend_data.append((state_flip, mcts_prob_flip, winner))
+            extend_data.append((state_flip, mcts_prob_flip, -winner))
         return extend_data
+
 
     def run(self, logger=None):
         try:

@@ -546,16 +546,22 @@ class Game:
         self.board.init_board()
         player.reset_player()
         states, mcts_probs, current_players = [], [], []
+        _count = 0
 
         while True:
+            start_time = time.time()
             move, move_probs = player.get_action(self.board, temp=temp, return_prob=1)
             success = self.board.do_move(move)
             if not success:
                 continue
-
+            result_msg = f'第{_count + 1}步，走一步要花: {time.time() - start_time}'
+            if logger and _count % 20 == 0:
+                logger.info(result_msg)
             states.append(self.board.current_state())
             mcts_probs.append(move_probs)
             current_players.append(self.board.current_player_id)
+            _count += 1
+
             end, winner = self.board.game_end()
             if end:
                 winner_z = np.zeros(len(current_players))
@@ -565,9 +571,11 @@ class Game:
                 else:
                     winner_z[:] = 0.0
                 player.reset_player()
+
                 if is_shown:
-                    result = "平局" if winner == -1 else f"玩家 {winner} 胜"
+                    result = "平局" if winner == -1 else f"玩家 {winner} 获胜"
                     print(result)
                     if logger:
                         logger.info(result)
+
                 return winner, zip(states, mcts_probs, winner_z)
